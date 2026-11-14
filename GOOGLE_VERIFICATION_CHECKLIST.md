@@ -61,7 +61,7 @@ Google refresh tokens are AES-256-GCM-encrypted using the existing server key wi
 
 Available-calendar metadata is shown to authorized workspace owners. Free/busy checks are used for requested times. Event creation stores the time, title “Appointment” and internal booking identifiers, not the conversation body. The app reads its own created event to reconcile uncertain outcomes. Ordinary customers cannot ask the AI for a private event list or meeting count.
 
-**External AI disclosure:** customer booking requests and the configured timezone go to DeepSeek; proposed/confirmed appointment results present in conversation history can also reach it. Google Limited Use covers derived data too. The policy and prominent connection disclosure say this. Confirm affirmative account-owner agreement and provider contractual practices before release; do not claim that “no Google-derived data ever reaches AI.” No general-purpose model-training implementation is present in the app, but the provider's independent practices are not verified merely by this code audit.
+**External AI disclosure:** independently authored customer requests and approved non-Calendar context go to DeepSeek. Calendar metadata, availability, events, responses and confirmation state remain backend-only. Migration 013 records message provenance; legacy generated replies and unknown summaries are excluded rather than guessed safe. All AI entry points apply the same boundary. Do not paste private calendar exports into user-authored rules or messages. Provider contractual practices for customer data still require review; no Google approval or provider audit is implied.
 
 ## 7. Demo: connection, calendar selection and booking
 

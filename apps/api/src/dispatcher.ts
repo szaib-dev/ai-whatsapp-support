@@ -37,7 +37,7 @@ export class PgInbox implements InboxRepository {
     await pool.query(`with a as (select * from whatsapp_accounts where session_id=$1 and status='connected' and authenticated_jid is not null),
       contact as (insert into contacts(organization_id,identity) select organization_id,$2 from a on conflict(organization_id,identity) do update set identity=excluded.identity returning *),
       conversation as (insert into conversations(organization_id,account_id,contact_id) select a.organization_id,a.id,contact.id from a,contact on conflict(organization_id,account_id,contact_id) do update set contact_id=excluded.contact_id returning *),
-      message as (insert into messages(organization_id,conversation_id,external_id,sender,content) select organization_id,id,$3,'customer',$4 from conversation on conflict do nothing)
+      message as (insert into messages(organization_id,conversation_id,external_id,sender,content,ai_context_source) select organization_id,id,$3,'customer',$4,'user' from conversation on conflict do nothing)
       insert into whatsapp_inbox(organization_id,account_id,session_id,customer_jid,external_id,content,message_at,owner_handled_at,state)
       select a.organization_id,a.id,a.session_id,$2,$3,$4,$5,
       case when h.handled_through>=$5 or r.external_id is not null then now() end,

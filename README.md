@@ -43,7 +43,7 @@ Operator contacts are configurable and supplied as Shahzaib Mirza (operating und
 
 Each business has separate authorized accounts, knowledge, conversations and calendar connection. The assistant uses DeepSeek for conversational replies and date/time extraction. A customer must explicitly confirm a proposed slot before a Google event is created; deterministic event IDs and uncertain-result handling reduce duplicate creation. Staff handoff pauses AI and queues an unread marker in WhatsApp. Clinic Online/Offline is a manual reply setting and is not phone-presence detection.
 
-Saved WhatsApp authentication and Google refresh credentials are encrypted with AES-256-GCM/context binding; messages and general calendar metadata are not separately field-encrypted. Conversation records persist until manual deletion; 30-day AI context/profile-memory expiry is not a database purge. Customer conversations and scheduling results present in history can reach the AI provider. Public policies disclose the actual processing and operator-assisted deletion process.
+Saved WhatsApp authentication and Google refresh credentials are encrypted with AES-256-GCM/context binding; messages and general calendar metadata are not separately field-encrypted. Conversation records persist until manual deletion; 30-day AI context/profile-memory expiry is not a database purge. Customer-authored messages and verified non-Calendar conversation context can reach the AI provider; Calendar-derived output is excluded by provenance. Public policies disclose the actual processing and operator-assisted deletion process.
 
 ## Validation
 

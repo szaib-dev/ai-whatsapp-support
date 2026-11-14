@@ -65,7 +65,7 @@ function context(name = "Revive"): Context {
       {
         organization_id: org,
         contact_id: contact,
-        content: `${name} customer asked about services`,
+        content: `${name} customer asked about services`,kind:'preferred_name',ai_context_source:'user',
       },
     ],
     history: [
@@ -73,7 +73,7 @@ function context(name = "Revive"): Context {
         organization_id: org,
         conversation_id: conversation,
         content: "Hello",
-        sender: "customer",
+        sender: "customer",ai_context_source:"user",
       },
     ],
   };

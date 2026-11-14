@@ -36,7 +36,7 @@ export class PgStore implements Store {
     ).rows[0];
     const parts=e.parts?.length ? e.parts : [e];
     if(parts.some(p=>p.jid!==e.jid))throw new TenantMismatch('Mixed customer batch');
-    await pool.query("insert into messages(organization_id,conversation_id,external_id,sender,content) select $1::uuid,$2::uuid,v.id,'customer',v.text from jsonb_to_recordset($3::jsonb) as v(id text,text text) on conflict do nothing",[org,conversation.id,JSON.stringify(parts.map(p=>({id:p.id,text:p.text})))]);
+    await pool.query("insert into messages(organization_id,conversation_id,external_id,sender,content,ai_context_source) select $1::uuid,$2::uuid,v.id,'customer',v.text,'user' from jsonb_to_recordset($3::jsonb) as v(id text,text text) on conflict do nothing",[org,conversation.id,JSON.stringify(parts.map(p=>({id:p.id,text:p.text})))]);
     const name=explicitName(e.text);
     if(name){
       const source=(await pool.query('select id from messages where organization_id=$1 and conversation_id=$2 and external_id=$3',[org,conversation.id,parts[parts.length-1].id])).rows[0];
@@ -53,7 +53,7 @@ export class PgStore implements Store {
     ).rows[0];
     const memories = (
       await pool.query(
-        "select m.* from contact_memories m join messages s on s.organization_id=m.organization_id and s.id=m.source_message_id join conversations c on c.organization_id=s.organization_id and c.id=s.conversation_id where m.organization_id=$1 and m.contact_id=$2 and c.contact_id=$2 and m.expires_at>now() order by m.created_at desc limit 20",
+        "select m.*,s.ai_context_source from contact_memories m join messages s on s.organization_id=m.organization_id and s.id=m.source_message_id join conversations c on c.organization_id=s.organization_id and c.id=s.conversation_id where m.organization_id=$1 and m.contact_id=$2 and c.contact_id=$2 and m.expires_at>now() order by m.created_at desc limit 20",
         [org, contact.id],
       )
     ).rows;
@@ -94,7 +94,7 @@ export class PgStore implements Store {
     e: Incoming,
     answer: string | null,
     send: () => Promise<string>,
-    options:{handoff?:boolean}={},
+    options:{handoff?:boolean;calendar?:boolean}={},
   ) {
     const db = await pool.connect();
     let attempted = false;
@@ -154,8 +154,8 @@ export class PgStore implements Store {
         attempted = true;
         const id = await send();
         await db.query(
-          "insert into messages(organization_id,conversation_id,external_id,sender,content,status) values($1,$2,$3,'ai',$4,'sent')",
-          [c.organization_id, c.conversation.id, id, answer],
+          "insert into messages(organization_id,conversation_id,external_id,sender,content,status,ai_context_source) values($1,$2,$3,'ai',$4,'sent',$5)",
+          [c.organization_id, c.conversation.id, id, answer,options.calendar?'calendar':'assistant'],
         );
         if(options.handoff){
           await db.query("update conversations set mode='human' where organization_id=$1 and id=$2",[c.organization_id,c.conversation.id]);

@@ -26,6 +26,7 @@ beforeAll(async () => {
   await db.exec(readFileSync("supabase/migrations/202611140010_connection_recovery.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611140011_handoff_unread.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611140012_production.sql", "utf8"));
+  await db.exec(readFileSync("supabase/migrations/202611140013_ai_provenance.sql", "utf8"));
   await db.query("insert into auth.users values($1),($2)", [alice, bob]);
   await db.query(
     "insert into organizations(id,name) values($1,'Revive'),($2,'Zorro')",

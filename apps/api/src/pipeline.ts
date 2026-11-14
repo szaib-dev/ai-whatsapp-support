@@ -31,7 +31,7 @@ export interface Store {
     event: Incoming,
     answer: string | null,
     send: () => Promise<string>,
-    options?:{handoff?:boolean},
+    options?:{handoff?:boolean;calendar?:boolean},
   ): Promise<void>;
   security(session: string): Promise<void>;
 }
@@ -100,7 +100,7 @@ export class MessagePipeline {
       validateContext(c, session);
       if (!(await this.store.claim(c, event))) return;
       let answer: string | null = null;
-      let handoff=false;
+      let handoff=false,calendar=false;
       if (
         c.conversation.mode === "active" &&
         !c.contact.ai_opt_out &&
@@ -108,6 +108,7 @@ export class MessagePipeline {
       ) {
         try {
           answer = explicitHandoff(event.text)?null:await this.appointments?.reply(c,event.text,event.id) ?? null;
+          calendar=answer!==null;
           if(answer===null){const decision=await automaticResponse(c,event.text,this.ai);answer=decision.reply;handoff=decision.handoff;}
         } catch {
           answer = null;
@@ -118,7 +119,7 @@ export class MessagePipeline {
         if (this.sockets.get(session) !== socket)
           throw new TenantMismatch("Socket changed");
         return socket.transport.send(c.contact.identity, answer!);
-      },{handoff});
+      },{handoff,calendar});
     } catch (error) {
       if (error instanceof TenantMismatch) await this.store.security(session);
       if (!finalized && error instanceof Error && !(error instanceof TenantMismatch)) Object.assign(error, { safeToRetry: true });

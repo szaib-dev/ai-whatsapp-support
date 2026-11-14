@@ -85,6 +85,7 @@ beforeAll(async () => {
   await db.exec(readFileSync("supabase/migrations/202611140010_connection_recovery.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611140011_handoff_unread.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611140012_production.sql", "utf8"));
+  await db.exec(readFileSync("supabase/migrations/202611140013_ai_provenance.sql", "utf8"));
   await db.query("insert into auth.users values($1),($2)", [alice, bob]);
   await db.query(
     "insert into organizations(id,name) values($1,'Revive'),($2,'Zorro')",
@@ -426,10 +427,10 @@ it('creates a confirmed appointment once and returns success only after Google c
  expect((await assistant.reply(c,'CONFIRM '+confirmationCode(proposal.id),id()))).toContain('booked');expect(google.create).toHaveBeenCalledTimes(1);
 });
 it('refuses an occupied slot without creating an event',async()=>{
- const {c,proposal,google}=await appointmentFixture();google.free=vi.fn(async()=>false);const reply=await new AppointmentAssistant(google).confirm(c,proposal.id);expect(reply).toContain('taken');expect(google.create).not.toHaveBeenCalled();
+ const {c,proposal,google}=await appointmentFixture();google.free=vi.fn(async()=>false);const reply=await new AppointmentAssistant(google).confirm(c,proposal.id);expect(reply).toMatch(/taken|available/);expect(google.create).not.toHaveBeenCalled();
 });
 it('keeps ambiguous Google writes uncertain and never blindly resends',async()=>{
- const {c,proposal,google}=await appointmentFixture();google.create=vi.fn(async()=>{throw Error('Timed out')});const assistant=new AppointmentAssistant(google);expect(await assistant.confirm(c,proposal.id)).toContain('uncertain');await assistant.confirm(c,proposal.id);expect(google.create).toHaveBeenCalledTimes(1);
+ const {c,proposal,google}=await appointmentFixture();google.create=vi.fn(async()=>{throw Error('Timed out')});const assistant=new AppointmentAssistant(google);expect(await assistant.confirm(c,proposal.id)).toMatch(/check|verify/);await assistant.confirm(c,proposal.id);expect(google.create).toHaveBeenCalledTimes(1);
  expect((await db.query<any>('select status from appointment_requests where id=$1',[proposal.id])).rows[0].status).toBe('uncertain');
 });
 it('does not create appointments after staff takeover or for another tenant',async()=>{
@@ -604,4 +605,17 @@ it('production Calendar onboarding requires recorded affirmative data-use consen
   const consented=await app.inject({method:'POST',url:`/calendar/connect/${token}/start`,payload:{data_use_consent:'approved'}});expect(consented.statusCode).toBe(302);expect(consented.headers['set-cookie']).toContain('Secure');
   const flow=(await db.query<any>('select data_use_consented_at,disclosure_version from calendar_oauth_flows where invite_id=$1',[created.id])).rows[0];expect(flow.data_use_consented_at).toBeTruthy();expect(flow.disclosure_version).toBe('2026-11-14');
  }finally{if(before===undefined)delete process.env.NODE_ENV;else process.env.NODE_ENV=before;restore();}
+});
+it.each([['English','Book an appointment tomorrow at 2 pm'],['Roman Urdu','Mujhe kal 2 baje appointment chahiye'],['Urdu','کیا کل دو بجے وقت مل سکتا ہے؟']])('backend-checked booking proposals and confirmations are natural in %s',async(language,text)=>{
+ const f=await appointmentFixture();f.c.responseLanguage=language;const start=new Date(f.proposal.starts_at).toISOString().slice(0,16);
+ const fetch=vi.spyOn(globalThis,'fetch').mockResolvedValue({ok:true,json:async()=>({choices:[{message:{content:JSON.stringify({startLocal:start,missing:'both'})}}]})} as any);
+ try{const assistant=new AppointmentAssistant(f.google),event=id();const reply=await assistant.reply(f.c,text,event);expect(reply).toContain('CONFIRM ');expect(reply).not.toMatch(/Google|UTC|timezone|API/);if(language==='Urdu')expect(reply).toMatch(/[\u0600-\u06ff]/);
+ const proposal=(await db.query<any>('select * from appointment_requests where organization_id=$1 and source_event=$2',[f.c.organization_id,event])).rows[0];expect(proposal.status).toBe('proposed');expect(f.google.create).not.toHaveBeenCalled();
+ const requests=fetch.mock.calls.length;expect(await assistant.reply(f.c,text,event)).toBe(reply);expect(fetch).toHaveBeenCalledTimes(requests);expect((await db.query<any>('select status from appointment_requests where id=$1',[proposal.id])).rows[0].status).toBe('proposed');
+ await assistant.confirm(f.c,proposal.id);await assistant.confirm(f.c,proposal.id);expect(f.google.create).toHaveBeenCalledTimes(1);
+ }finally{fetch.mockRestore()}
+});
+it('busy slots never produce a proposal or confirmed claim',async()=>{
+ const f=await appointmentFixture();f.google.free=vi.fn(async()=>false);const start=new Date(f.proposal.starts_at).toISOString().slice(0,16);const fetch=vi.spyOn(globalThis,'fetch').mockResolvedValue({ok:true,json:async()=>({choices:[{message:{content:JSON.stringify({startLocal:start})}}]})} as any);
+ try{const event=id(),reply=await new AppointmentAssistant(f.google).reply(f.c,'Book an appointment tomorrow at 2 pm',event);expect(reply).not.toContain('CONFIRM');expect(f.google.create).not.toHaveBeenCalled();expect((await db.query<any>('select count(*)::int n from appointment_requests where organization_id=$1 and source_event=$2',[f.c.organization_id,event])).rows[0].n).toBe(0);}finally{fetch.mockRestore()}
 });

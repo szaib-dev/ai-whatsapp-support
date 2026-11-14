@@ -24,6 +24,7 @@ const probes={
  '202611140009':"select to_regclass('public.status_portal_logins') is not null ok",
  '202611140010':"select exists(select 1 from information_schema.columns where table_name='whatsapp_accounts' and column_name='desired_connected') ok",
  '202611140011':"select to_regclass('public.handoff_unread_requests') is not null ok",
+ '202611140013':"select exists(select 1 from information_schema.columns where table_name='messages' and column_name='ai_context_source') ok",
  '202611140012':"select exists(select 1 from information_schema.columns where table_name='calendar_oauth_flows' and column_name='disclosure_version') ok"
 };
 try{
