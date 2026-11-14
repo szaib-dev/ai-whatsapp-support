@@ -1,0 +1,96 @@
+name: codetic
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: '3'
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: codetic-api:${RELEASE_TAG:-local}
+    env_file: .env.production
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: '3101'
+      DATABASE_SSL_CA_FILE: /run/config/db-ca.pem
+    volumes:
+      - ./deploy/secrets/db-ca.pem:/run/config/db-ca.pem:ro
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 45s
+    read_only: true
+    tmpfs: [/tmp:size=64m]
+    mem_limit: 1g
+    cpus: 1.5
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3101/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 15s
+      start_period: 90s
+      retries: 3
+    logging: *logging
+    networks: [codetic]
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${SUPABASE_URL:?Set SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:?Set SUPABASE_ANON_KEY}
+        NEXT_PUBLIC_API_URL: ${PUBLIC_API_URL:-https://api.netawaz.pk}
+        NEXT_PUBLIC_SITE_URL: ${WEB_ORIGIN:-https://codetic.netawaz.pk}
+    image: codetic-web:${RELEASE_TAG:-local}
+    environment:
+      NODE_ENV: production
+      API_INTERNAL_URL: http://api:3101
+      WEB_ORIGIN: ${WEB_ORIGIN:-https://codetic.netawaz.pk}
+      OPERATOR_LEGAL_NAME: ${OPERATOR_LEGAL_NAME:?Set operator name}
+      OPERATOR_COUNTRY: ${OPERATOR_COUNTRY:?Set operator country}
+      SUPPORT_EMAIL: ${SUPPORT_EMAIL:?Set support email}
+      PRIVACY_EMAIL: ${PRIVACY_EMAIL:?Set privacy email}
+      BACKUP_RETENTION_DESCRIPTION: ${BACKUP_RETENTION_DESCRIPTION:?Set backup policy}
+      LEGAL_DISCLOSURES_APPROVED: ${LEGAL_DISCLOSURES_APPROVED:-false}
+    restart: unless-stopped
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+      - /app/apps/web/.next/cache:size=64m,uid=1000,gid=1000
+    mem_limit: 768m
+    cpus: 1.0
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    logging: *logging
+    networks: [codetic]
+  caddy:
+    image: caddy:2.11.9-alpine
+    environment:
+      ACME_EMAIL: ${SUPPORT_EMAIL:?Set support email}
+    ports: ['80:80', '443:443', '443:443/udp']
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    mem_limit: 192m
+    cpus: 0.5
+    security_opt: [no-new-privileges:true]
+    logging: *logging
+    networks: [codetic]
+    depends_on: [api,web]
+networks:
+  codetic:
+volumes:
+  caddy_data:
+  caddy_config:

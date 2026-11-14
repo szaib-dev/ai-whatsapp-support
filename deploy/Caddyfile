@@ -1,0 +1,40 @@
+{
+ email {$ACME_EMAIL}
+ # No access log: private invitation paths and OAuth queries must not be recorded.
+ log default {
+  format filter {
+   wrap json
+   fields {
+    request>uri delete
+    request>headers delete
+   }
+  }
+ }
+ admin localhost:2019
+}
+(common) {
+ encode zstd gzip
+ header {
+  X-Content-Type-Options nosniff
+  X-Frame-Options DENY
+  Referrer-Policy no-referrer
+  Strict-Transport-Security "max-age=31536000"
+  -Server
+ }
+}
+codetic.netawaz.pk {
+ import common
+ @calendar path /calendar/*
+ handle @calendar {
+  header X-Robots-Tag "noindex, nofollow"
+  reverse_proxy api:3101
+ }
+ handle {
+  reverse_proxy web:3000
+ }
+}
+api.netawaz.pk {
+ import common
+ header X-Robots-Tag "noindex, nofollow"
+ reverse_proxy api:3101
+}

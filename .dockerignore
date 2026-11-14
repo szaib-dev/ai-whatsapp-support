@@ -1,0 +1,14 @@
+node_modules
+**/node_modules
+**/.next
+.git
+.env*
+**/.env*
+dist
+tests
+backups
+deploy/secrets
+**/*.dump
+**/*.backup
+**/*.pem
+**/*.key
