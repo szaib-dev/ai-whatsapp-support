@@ -1,6 +1,6 @@
 import { PGlite } from "@electric-sql/pglite";
 import { readFileSync } from "node:fs";
-import { randomUUID as id } from "node:crypto";
+import { randomUUID as id,randomBytes,createHash } from "node:crypto";
 import { beforeAll, afterAll, it, expect, vi } from "vitest";
 const state = vi.hoisted(() => ({ db: null as any, user: "" }));
 vi.mock("../apps/api/src/db.js", async () => {
@@ -16,6 +16,7 @@ vi.mock("../apps/api/src/db.js", async () => {
     // otherwise retain their original network pool despite the pool override.
     publication: async (org: string) => (await query("select r.* from knowledge_publications p join knowledge_revisions r on r.organization_id=p.organization_id and r.id=p.revision_id where p.organization_id=$1", [org])).rows[0],
     audit: async (org: string | null, event: string, resource: string | null = null, actor: string | null = null) => { await query("insert into audit_logs(organization_id,event,resource_id,actor_id) values($1,$2,$3,$4)", [org,event,resource,actor]); },
+    privacyLocks:{connect:async()=>({query:async()=>({rows:[]}),on:()=>{},removeListener:()=>{},release:()=>{}}),end:async()=>{}},
     pool: {
       query,
       connect: async () => ({
@@ -86,6 +87,7 @@ beforeAll(async () => {
   await db.exec(readFileSync("supabase/migrations/202611140011_handoff_unread.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611140012_production.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611140013_ai_provenance.sql", "utf8"));
+  await db.exec(readFileSync("supabase/migrations/202611160001_chat_privacy.sql", "utf8"));
   await db.query("insert into auth.users values($1),($2)", [alice, bob]);
   await db.query(
     "insert into organizations(id,name) values($1,'Revive'),($2,'Zorro')",
@@ -618,4 +620,81 @@ it.each([['English','Book an appointment tomorrow at 2 pm'],['Roman Urdu','Mujhe
 it('busy slots never produce a proposal or confirmed claim',async()=>{
  const f=await appointmentFixture();f.google.free=vi.fn(async()=>false);const start=new Date(f.proposal.starts_at).toISOString().slice(0,16);const fetch=vi.spyOn(globalThis,'fetch').mockResolvedValue({ok:true,json:async()=>({choices:[{message:{content:JSON.stringify({startLocal:start})}}]})} as any);
  try{const event=id(),reply=await new AppointmentAssistant(f.google).reply(f.c,'Book an appointment tomorrow at 2 pm',event);expect(reply).not.toContain('CONFIRM');expect(f.google.create).not.toHaveBeenCalled();expect((await db.query<any>('select count(*)::int n from appointment_requests where organization_id=$1 and source_event=$2',[f.c.organization_id,event])).rows[0].n).toBe(0);}finally{fetch.mockRestore()}
+});
+
+import {rememberPhone,isChatStopped} from '../apps/api/src/chat-privacy.js';
+async function privacyFixture(){
+ const org=id(),account=id(),token=randomBytes(32).toString('hex');
+ await db.query("insert into organizations(id,name,reply_delay_ms) values($1,'Privacy clinic',0)",[org]);
+ const row=(await db.query<any>("insert into whatsapp_accounts(id,organization_id,authenticated_jid,status) values($1,$2,$3,'connected') returning *",[account,org,id()+'@s.whatsapp.net'])).rows[0];
+ await db.query("insert into status_portal_logins(organization_id,email,password_hash) values($1,$2,'unused-test-hash')",[org,org+'@example.com']);
+ await db.query("insert into status_portal_sessions(token_hash,organization_id,expires_at) values($1,$2,now()+interval '1 day')",[createHash('sha256').update(token).digest('hex'),org]);
+ return {org,account:row,inbox:new PgInbox(),cookie:'clinic_status='+token,headers:{...clinicHeaders,cookie:'clinic_status='+token}};
+}
+async function takeFor(f:Awaited<ReturnType<typeof privacyFixture>>){const keys=(await db.query<any>("select distinct organization_id::text||'/'||account_id::text||'/'||customer_jid as key from whatsapp_inbox where organization_id<>$1",[f.org])).rows.map(r=>r.key);return f.inbox.take(keys);}
+async function stopPhone(f:Awaited<ReturnType<typeof privacyFixture>>,phone:string,stopped=true){
+ const r=await app.inject({method:'PUT',url:'/status-api/chat-controls',headers:f.headers,payload:{phone,stopped}});expect(r.statusCode).toBe(200);return r.json();
+}
+it('clinic chat controls expose phone numbers only, scoped to the authenticated clinic',async()=>{
+ const f=await privacyFixture(),other=await privacyFixture();
+ await f.inbox.save(f.account.session_id,{id:id(),jid:'923001234567@s.whatsapp.net',text:'PRIVATE_CHAT_CONTENT_CANARY'});
+ await other.inbox.save(other.account.session_id,{id:id(),jid:'441234567891@s.whatsapp.net',text:'OTHER_CLINIC_CANARY'});
+ expect((await app.inject({url:'/status-api/chat-controls'})).statusCode).toBe(403);
+ const response=await app.inject({url:'/status-api/chat-controls',headers:{cookie:f.cookie}});
+ expect(response.statusCode).toBe(200);expect(response.json()).toEqual({numbers:[{phone:'923001234567',stopped:false}],hasMore:false});
+ for(const secret of ['PRIVATE_CHAT_CONTENT_CANARY','OTHER_CLINIC_CANARY','441234567891',f.account.id])expect(response.body).not.toContain(secret);
+ expect((await app.inject({method:'PUT',url:'/status-api/chat-controls',headers:{cookie:f.cookie},payload:{phone:'923001234567',stopped:true}})).statusCode).toBe(403);
+ expect((await app.inject({method:'PUT',url:'/status-api/chat-controls',headers:f.headers,payload:{phone:'923001234567',stopped:true,organization_id:other.org}})).statusCode).toBe(400);
+ for(const phone of ['abc','03001234567','923001234567@lid','+123'])expect((await app.inject({method:'PUT',url:'/status-api/chat-controls',headers:f.headers,payload:{phone,stopped:true}})).statusCode).toBe(400);
+});
+it('stopping a phone ignores future messages across accounts and aliases without storing content or memory',async()=>{
+ const f=await privacyFixture(),phone='923001234567',jid=phone+'@s.whatsapp.net',lid='1234567890123@lid';
+ const second=(await db.query<any>("insert into whatsapp_accounts(organization_id,authenticated_jid,status) values($1,'923448888888@s.whatsapp.net','connected') returning *",[f.org])).rows[0];
+ await rememberPhone(f.org,second.id,lid,phone);
+ await f.inbox.save(f.account.session_id,{id:id(),jid,text:'Before stopping'});await f.inbox.save(second.session_id,{id:id(),jid:lid,text:'Before stopping via LID'});
+ expect(await stopPhone(f,'+92 (300) 123-4567')).toEqual({phone,stopped:true});
+ expect(await isChatStopped(f.org,f.account.id,jid)).toBe(true);expect(await isChatStopped(f.org,second.id,lid)).toBe(true);
+ expect((await db.query<any>("select count(*)::int n from whatsapp_inbox where organization_id=$1 and state<>'done'",[f.org])).rows[0].n).toBe(0);
+ const before=(await db.query<any>('select count(*)::int n from messages where organization_id=$1',[f.org])).rows[0].n;
+ for(const [session,address] of [[f.account.session_id,jid],[second.session_id,lid]])await f.inbox.save(session,{id:id(),jid:address,text:'My name is NEVER_PERSIST_THIS'});
+ const store=new PgStore(),binding=await store.resolve(f.account.session_id);
+ expect(await store.load(binding,{id:id(),jid,text:'My name is NEVER_PERSIST_THIS'})).toBeNull();
+ const ai={select:vi.fn(async()=>null),respond:vi.fn(async()=>'Unexpected reply')},booking={reply:vi.fn(async()=>null)},send=vi.fn(async()=>id());
+ const pipeline=new MessagePipeline(store,ai,booking);await pipeline.bind(binding.session,binding.authenticatedJid,{send});
+ await pipeline.receive(binding.session,{id:id(),jid,text:'My name is NEVER_PERSIST_THIS'});
+ expect(ai.respond).not.toHaveBeenCalled();expect(ai.select).not.toHaveBeenCalled();expect(booking.reply).not.toHaveBeenCalled();expect(send).not.toHaveBeenCalled();
+ expect((await db.query<any>('select count(*)::int n from messages where organization_id=$1',[f.org])).rows[0].n).toBe(before);
+ expect((await db.query('select * from contact_memories where organization_id=$1',[f.org])).rows).toHaveLength(0);
+});
+it('resume never replays captured or delayed messages from before/during the stop',async()=>{
+ const f=await privacyFixture(),jid='923001234567@s.whatsapp.net';
+ await f.inbox.save(f.account.session_id,{id:id(),jid,text:'Old queued request'});
+ const batch=(await takeFor(f))!;expect(batch.events).toHaveLength(1);
+ await stopPhone(f,'923001234567');await stopPhone(f,'923001234567',false);
+ expect((await takeFor(f))).toBeNull();
+ const store=new PgStore(),binding=await store.resolve(f.account.session_id),load=vi.spyOn(store,'load');
+ const ai={select:vi.fn(async()=>null),respond:vi.fn(async()=>'Unexpected replay')},send=vi.fn(async()=>id());
+ const pipeline=new MessagePipeline(store,ai);await pipeline.bind(binding.session,binding.authenticatedJid,{send});await pipeline.receive(binding.session,batch.events[0]);
+ expect(load).not.toHaveBeenCalled();expect(ai.respond).not.toHaveBeenCalled();expect(send).not.toHaveBeenCalled();
+ await f.inbox.save(binding.session,{id:id(),jid,text:'Delayed old message',timestamp:batch.events[0].timestamp});
+ expect((await takeFor(f))).toBeNull();
+ await f.inbox.save(binding.session,{id:id(),jid,text:'Fresh after resuming',timestamp:Date.now()+1000});
+ expect((await takeFor(f))?.events[0].text).toBe('Fresh after resuming');
+});
+it('unknown LIDs fail closed under a stop list, while mapped allowed numbers and other clinics still work',async()=>{
+ const f=await privacyFixture(),other=await privacyFixture(),lid='9999999999999@lid';await stopPhone(f,'923001234567');
+ await f.inbox.save(f.account.session_id,{id:id(),jid:lid,text:'Unknown identity MUST NOT SAVE'});
+ expect((await db.query('select * from messages where organization_id=$1',[f.org])).rows).toHaveLength(0);
+ await rememberPhone(f.org,f.account.id,lid,'923009876543');await f.inbox.save(f.account.session_id,{id:id(),jid:lid,text:'Mapped allowed number'});
+ await other.inbox.save(other.account.session_id,{id:id(),jid:'923001234567@s.whatsapp.net',text:'Other clinic is isolated'});
+ expect((await db.query('select * from messages where organization_id=$1',[f.org])).rows).toHaveLength(1);expect((await db.query('select * from messages where organization_id=$1',[other.org])).rows).toHaveLength(1);
+});
+it('database backstops reject legacy direct message/inbox writes for stopped numbers',async()=>{
+ const f=await privacyFixture(),jid='923001234567@s.whatsapp.net',store=new PgStore(),binding=await store.resolve(f.account.session_id);
+ const c=(await store.load(binding,{id:id(),jid,text:'Existing history'}))!;await stopPhone(f,'923001234567');
+ await expect(db.query("insert into messages(organization_id,conversation_id,external_id,sender,content) values($1,$2,$3,'customer','DENIED_WRITE')",[f.org,c.conversation.id,id()])).rejects.toThrow('Chat excluded');
+ await expect(db.query("insert into whatsapp_inbox(organization_id,account_id,session_id,customer_jid,external_id,content,message_at) values($1,$2,$3,$4,$5,'DENIED_QUEUE',now())",[f.org,f.account.id,f.account.session_id,jid,id()])).rejects.toThrow('Chat excluded');
+ expect((await db.query<any>('select content from messages where organization_id=$1',[f.org])).rows.map(r=>r.content)).toEqual(['Existing history']);
+ await db.query('update status_portal_logins set enabled=false where organization_id=$1',[f.org]);
+ expect((await app.inject({method:'PUT',url:'/status-api/chat-controls',headers:f.headers,payload:{phone:'923001234567',stopped:false}})).statusCode).toBe(403);
 });

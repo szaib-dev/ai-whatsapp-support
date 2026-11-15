@@ -1,3 +1,4 @@
+import {privacyGate,withChatPrivacy,isChatStopped,phoneFromJid,rememberPhone,assertPrivacyLease} from './chat-privacy.js';
 import {ownerHandled,messageTime} from "./owner-availability.js";
 import {AppointmentAssistant} from "./appointments.js";
 import makeWASocket, { DisconnectReason, generateMessageIDV2, jidNormalizedUser, normalizeMessageContent, type WASocket } from "@whiskeysockets/baileys";
@@ -76,7 +77,7 @@ export class WhatsAppManager {
       const rows=(await pool.query(`select h.* from handoff_unread_requests h
         join conversations c on c.organization_id=h.organization_id and c.id=h.conversation_id
         join whatsapp_accounts a on a.organization_id=h.organization_id and a.id=h.account_id
-        where c.mode='human' and a.removed_at is null and h.account_id=any($1::uuid[]) order by h.created_at limit 100`,[[...this.live.values()].filter(l=>l.opened&&!l.stopped).map(l=>l.account)])).rows;
+        where not chat_is_stopped(h.organization_id,h.account_id,h.customer_jid) and c.mode='human' and a.removed_at is null and h.account_id=any($1::uuid[]) order by h.created_at limit 100`,[[...this.live.values()].filter(l=>l.opened&&!l.stopped).map(l=>l.account)])).rows;
       for(const h of rows){
         const live=this.live.get(h.account_id);if(!live||live.org!==h.organization_id||live.stopped||!live.opened||!live.socket)continue;
         try{
@@ -158,7 +159,7 @@ export class WhatsAppManager {
           if (l.stopped || l.socket !== socket) throw new Error("Stale connection");
           const id = generateMessageIDV2(socket.user?.id);
           this.generatedIds.add(id);if(this.generatedIds.size>2000)this.generatedIds.delete(this.generatedIds.values().next().value!);
-          const sent = await socket.sendMessage(target, { text }, { messageId: id });
+          const sent = await withChatPrivacy(l.org,l.account,target,()=>socket.sendMessage(target, { text }, { messageId: id }));
           if (!sent?.key.id) throw new Error("Uncertain send");
           this.repliedAt.set(`${l.session}/${target}`,Date.now());
           void socket.sendPresenceUpdate('paused',target).catch(()=>{});
@@ -187,32 +188,39 @@ export class WhatsAppManager {
     socket.ev.on("messages.upsert", event => {
       enqueue(async () => {
       for (const message of event.messages) {
-        const jid = message.key.remoteJid || "";
-        if (!message.key.id || !/^.+@(s\.whatsapp\.net|lid)$/.test(jid)) continue;
-        // Phone replies and our own echoes do not silently disable the assistant.
-        if (message.key.fromMe) {
-          const time=messageTime(message.messageTimestamp);
-          if(!this.generatedIds.has(message.key.id)&&message.messageTimestamp){
-            const ours=(await pool.query("select 1 from messages m join conversations c on c.organization_id=m.organization_id and c.id=m.conversation_id where m.organization_id=$1 and c.account_id=$2 and m.external_id=$3 and m.sender in ('ai','staff') limit 1",[l.org,l.account,message.key.id])).rows.length>0;
-            if(!ours)await ownerHandled(l.org,l.account,jid,time);
+        const jid=message.key.remoteJid||'';
+        if(!message.key.id||!/^.+@(s\.whatsapp\.net|lid)$/.test(jid))continue;
+        // Inspect routing metadata only. Never normalize/read a stopped message body.
+        await privacyGate(l.org,false,async()=>{
+          const alternate=message.key.remoteJidAlt||'';
+          let phone=phoneFromJid(jid)||phoneFromJid(alternate);
+          if(!phone&&jid.endsWith('@lid'))phone=phoneFromJid(await socket.signalRepository?.lidMapping?.getPNForLID(jid)||'');
+          if(phone){await rememberPhone(l.org,l.account,jid,phone);if(alternate.endsWith('@lid'))await rememberPhone(l.org,l.account,alternate,phone);}
+          if(await isChatStopped(l.org,l.account,jid,messageTime(message.messageTimestamp).getTime()))return;
+          assertPrivacyLease();
+          if(message.key.fromMe){
+            const time=messageTime(message.messageTimestamp);
+            if(!this.generatedIds.has(message.key.id!)&&message.messageTimestamp){
+              const ours=(await pool.query("select 1 from messages m join conversations c on c.organization_id=m.organization_id and c.id=m.conversation_id where m.organization_id=$1 and c.account_id=$2 and m.external_id=$3 and m.sender in ('ai','staff') limit 1",[l.org,l.account,message.key.id])).rows.length>0;
+              if(!ours)await ownerHandled(l.org,l.account,jid,time);
+            }
+            return;
           }
-          continue;
-        }
-        if(event.type!=='notify')continue;
-        const content = normalizeMessageContent(message.message);
-        const text = content?.conversation || content?.extendedTextMessage?.text || content?.imageMessage?.caption || content?.videoMessage?.caption || (content?.audioMessage || content?.imageMessage || content?.videoMessage || content?.documentMessage || content?.stickerMessage ? "[The customer sent an attachment. Ask them to describe what they need in text.]" : "");
-        if (text) this.customerActivity(l, socket, message);
-        if (text) await this.inbox.save(l.session, { id: message.key.id, jid, text, timestamp:messageTime(message.messageTimestamp).getTime() });
+          if(event.type!=='notify')return;
+          const content=normalizeMessageContent(message.message);
+          const text=content?.conversation||content?.extendedTextMessage?.text||content?.imageMessage?.caption||content?.videoMessage?.caption||(content?.audioMessage||content?.imageMessage||content?.videoMessage||content?.documentMessage||content?.stickerMessage?'[The customer sent an attachment. Ask them to describe what they need in text.]':'');
+          if(text){this.customerActivity(l,socket,message);await this.inbox.save(l.session,{id:message.key.id!,jid,text,timestamp:messageTime(message.messageTimestamp).getTime()});}
+        });
       }
     }, false);
     });
   }
   private ownerSignals(l:Live,socket:WASocket,enqueue:(fn:()=>Promise<void>,fatal?:boolean)=>void){
     socket.ev.on('messages.update',updates=>enqueue(async()=>{
-      for(const {key,update} of updates){if(key.fromMe===false&&key.id&&key.remoteJid&&Number(update.status)>=4)await ownerHandled(l.org,l.account,key.remoteJid,new Date(),key.id)}
+      for(const {key,update} of updates){if(key.fromMe===false&&key.id&&key.remoteJid&&Number(update.status)>=4)await withChatPrivacy(l.org,l.account,key.remoteJid,()=>ownerHandled(l.org,l.account,key.remoteJid!,new Date(),key.id!))}
     },false));
     socket.ev.on('chats.update',updates=>enqueue(async()=>{
-      for(const chat of updates){if(chat.unreadCount===0&&chat.id&&/^.+@(s\.whatsapp\.net|lid)$/.test(chat.id))await ownerHandled(l.org,l.account,chat.id,messageTime(chat.timestamp||chat.conversationTimestamp));}
+      for(const chat of updates){if(chat.unreadCount===0&&chat.id&&/^.+@(s\.whatsapp\.net|lid)$/.test(chat.id))await withChatPrivacy(l.org,l.account,chat.id,()=>ownerHandled(l.org,l.account,chat.id!,messageTime(chat.timestamp||chat.conversationTimestamp)));}
     },false));
   }
   private customerActivity(l: Live, socket: WASocket, message: any) {
@@ -220,7 +228,7 @@ export class WhatsAppManager {
     const receivedAt=Date.now();
     const timer=setTimeout(()=>{
       this.activityTimers.delete(timer);
-      void (async()=>{
+      void withChatPrivacy(l.org,l.account,jid,async()=>{
         if(l.stopped||l.socket!==socket)return;
         // Receipts and presence are best effort; they never block message persistence.
         const result=await pool.query(`select o.reply_only_when_away from whatsapp_accounts a join organizations o on o.id=a.organization_id
@@ -233,7 +241,7 @@ export class WhatsAppManager {
         await socket.sendPresenceUpdate('composing',jid).catch(()=>{});
         const end=setTimeout(()=>{this.activityTimers.delete(end);if(!l.stopped&&l.socket===socket)void socket.sendPresenceUpdate('paused',jid).catch(()=>{});},15000);
         end.unref();this.activityTimers.add(end);
-      })().catch(()=>{});
+      }).catch(()=>{});
     },1000);timer.unref();this.activityTimers.add(timer);
   }
   qr(org: string, account: string) {
@@ -257,7 +265,7 @@ export class WhatsAppManager {
     const live = this.live.get(account);
     if (!live || live.org !== org || live.stopped || !live.socket) throw new Error("WhatsApp is disconnected");
     this.generatedIds.add(messageId);
-    const sent = await live.socket.sendMessage(jid, { text }, { messageId });
+    const sent = await withChatPrivacy(org,account,jid,()=>live.socket!.sendMessage(jid, { text }, { messageId }));
     if (!sent?.key.id) throw new Error("Delivery uncertain");
     return sent.key.id;
   }

@@ -50,5 +50,9 @@
   "202611140013_ai_provenance.sql": {
     "sha256": "ba1b10ed3666eba389558e2b7f4babd2dedcb353b753e3b897a5741e1dac168d",
     "backwardCompatible": true
+  },
+  "202611160001_chat_privacy.sql": {
+    "sha256": "95f697bc8fb665e3c8a4983819070fa0a58541626727b8bdd4c0d1a4cc5f6459",
+    "backwardCompatible": true
   }
 }

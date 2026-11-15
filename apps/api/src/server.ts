@@ -8,7 +8,7 @@ import cors from "@fastify/cors";
 import rateLimit from "@fastify/rate-limit";
 import { createClient } from "@supabase/supabase-js";
 import { z } from "zod";
-import { pool, Forbidden } from "./db.js";
+import { pool, privacyLocks, Forbidden } from "./db.js";
 import { knowledgeSchema, parseDocument } from "./knowledge.js";
 import { WhatsAppManager } from "./whatsapp.js";
 import { MESSAGE_POLICY } from "./dispatcher.js";
@@ -435,6 +435,7 @@ export async function buildServer(whatsapp?: WhatsAppManager) {
   );
   app.addHook("onClose", async () => {
     await whatsapp?.close();
+    await privacyLocks.end();
     await pool.end();
   });
   return app;

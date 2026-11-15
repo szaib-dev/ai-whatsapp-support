@@ -27,6 +27,7 @@ beforeAll(async () => {
   await db.exec(readFileSync("supabase/migrations/202611140011_handoff_unread.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611140012_production.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611140013_ai_provenance.sql", "utf8"));
+  await db.exec(readFileSync("supabase/migrations/202611160001_chat_privacy.sql", "utf8"));
   await db.query("insert into auth.users values($1),($2)", [alice, bob]);
   await db.query(
     "insert into organizations(id,name) values($1,'Revive'),($2,'Zorro')",
@@ -165,6 +166,8 @@ describe("real PostgreSQL policies and constraints (PGlite)", () => {
     );
     expect(r.rows.map((x) => x.relname).sort()).toEqual(
       [
+        "chat_phone_addresses",
+        "chat_stopped_numbers",
         "handoff_unread_requests",
         "calendar_connections",
         "calendar_invites",
@@ -192,4 +195,16 @@ describe("real PostgreSQL policies and constraints (PGlite)", () => {
     );
     expect(r.rows.every((x) => x.relrowsecurity)).toBe(true);
   });
+});
+
+it('browser roles cannot read or modify chat privacy tables or invoke privacy functions',async()=>{
+ await asUser(alice,async()=>{
+  await expect(db.query('select * from chat_stopped_numbers')).rejects.toThrow(/permission denied/i);
+ });
+ await asUser(alice,async()=>{
+  await expect(db.query('select * from chat_phone_addresses')).rejects.toThrow(/permission denied/i);
+ });
+ await asUser(alice,async()=>{
+  await expect(db.query("select chat_is_stopped($1,$2,'923001234567@s.whatsapp.net')",[a,id()])).rejects.toThrow(/permission denied/i);
+ });
 });

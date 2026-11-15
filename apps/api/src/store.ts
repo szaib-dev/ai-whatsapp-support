@@ -1,3 +1,4 @@
+import {withChatPrivacy} from './chat-privacy.js';
 import {OwnerDeferred} from "./owner-availability.js";
 import { pool, audit, publication } from "./db.js";
 import { knowledgeSchema, defaultKnowledge, DEFAULT_REVISION_ID } from "./knowledge.js";
@@ -20,7 +21,9 @@ export class PgStore implements Store {
       authenticatedJid: a.authenticated_jid,
     };
   }
-  async load(b: SessionBinding, e: Incoming): Promise<Context | null> {
+  async guard(b:SessionBinding,e:Incoming,work:()=>Promise<void>){return withChatPrivacy(b.organization,b.account,e.jid,work,earliest(e));}
+  async load(b:SessionBinding,e:Incoming):Promise<Context|null>{return await withChatPrivacy(b.organization,b.account,e.jid,()=>this.loadAllowed(b,e),earliest(e))??null;}
+  private async loadAllowed(b: SessionBinding, e: Incoming): Promise<Context | null> {
     const org = b.organization;
     const contact = (
       await pool.query(
@@ -89,7 +92,10 @@ export class PgStore implements Store {
       ).rowCount === 1
     );
   }
-  async finalize(
+  async finalize(c:Context,e:Incoming,answer:string|null,send:()=>Promise<string>,options:{handoff?:boolean;calendar?:boolean}={}){
+    return withChatPrivacy(c.organization_id,c.account.id,e.jid,()=>this.finalizeAllowed(c,e,answer,send,options));
+  }
+  private async finalizeAllowed(
     c: Context,
     e: Incoming,
     answer: string | null,
@@ -193,3 +199,5 @@ export class PgStore implements Store {
     await audit(null, "tenant_validation_failed", session);
   }
 }
+
+function earliest(e:Incoming){const values=(e.parts||[e]).map(p=>p.timestamp).filter((v):v is number=>typeof v==='number');return values.length?Math.min(...values):undefined;}

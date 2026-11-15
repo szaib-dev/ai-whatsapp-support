@@ -90,6 +90,7 @@ function harness(c = context()) {
     security = vi.fn(async () => {}),
     select = vi.fn(async () => c.revision.content.facts[0].id);
   const store: Store = {
+    guard: async (_binding,_event,work) => work(),
     resolve: vi.fn(async () => binding),
     load: vi.fn(async () => c),
     claim: vi.fn(async (_c, e) => {

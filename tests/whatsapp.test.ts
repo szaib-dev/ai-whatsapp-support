@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { randomBytes } from "node:crypto";
 const mock = vi.hoisted(() => ({ sockets: [] as any[], dispatch:undefined as undefined|((session:string,event:any)=>Promise<void>), query: vi.fn(), bind: vi.fn(), unbind: vi.fn(), receive: vi.fn(), inboxSave: vi.fn(), save: vi.fn(), audit: vi.fn(), rejectIdentity: false, leaseError: undefined as (() => void) | undefined, release: vi.fn() }));
-vi.mock("../apps/api/src/db.js", () => ({ pool: { query: mock.query, connect: async () => ({ query: async () => ({ rows: [{ locked: true }] }), release: mock.release, on: (_name: string, handler: () => void) => { mock.leaseError = handler; } }) }, audit: mock.audit }));
+vi.mock("../apps/api/src/db.js", () => ({ privacyLocks:{connect:async()=>({query:async()=>({rows:[]}),on:()=>{},removeListener:()=>{},release:()=>{}})}, pool: { query: mock.query, connect: async () => ({ query: async () => ({ rows: [{ locked: true }] }), release: mock.release, on: (_name: string, handler: () => void) => { mock.leaseError = handler; } }) }, audit: mock.audit }));
 vi.mock("../apps/api/src/pipeline.js", () => ({ MessagePipeline: class { bind = mock.bind; unbind = mock.unbind; receive = mock.receive; } }));
 vi.mock("../apps/api/src/whatsapp-auth.js", () => ({ encryptedAuth: async () => ({ state: {}, save: mock.save, flush: async () => {} }) }));
 vi.mock("qrcode", () => ({ default: { toDataURL: async (qr: string) => "data:image/png;base64," + qr } }));
@@ -101,7 +101,7 @@ it('uses incoming read sync only, never a customer reading our outbound message'
  await new Promise(r=>setTimeout(r,10));expect(mock.query.mock.calls.filter(([sql])=>sql.startsWith('insert into whatsapp_owner_reads'))).toHaveLength(count);
 });
 it('does not auto-read waiting messages in away-only mode',async()=>{
- vi.useFakeTimers();mock.query.mockImplementation(async()=>({rows:[{reply_only_when_away:true}],rowCount:1}));
+ vi.useFakeTimers();mock.query.mockImplementation(async(sql:string)=>({rows:sql.includes('/* chat privacy */')?[]:[{reply_only_when_away:true}],rowCount:1}));
  mock.sockets[0].emit('messages.upsert',{type:'notify',messages:[{key:{id:'waiting',remoteJid:'customer@lid'},message:{conversation:'Hello'}}]});await vi.advanceTimersByTimeAsync(1100);expect(mock.sockets[0].readMessages).not.toHaveBeenCalled();
 });
 it('repeated connect requests and workspace reads preserve both account transports',async()=>{
@@ -154,4 +154,30 @@ it('staff handoff unread markers use the correct account, retry failures and nev
  await mock.dispatch!('session',{id:'event',jid:'customer@lid',text:'Staff please'});expect(pending).toBe(true);expect(socket.end).not.toHaveBeenCalled();
  await mock.dispatch!('session',{id:'next',jid:'customer@lid',text:'Follow-up'});expect(pending).toBe(false);
  expect(socket.chatModify).toHaveBeenCalledTimes(2);expect(socket.chatModify).toHaveBeenLastCalledWith({markRead:false,lastMessages:[{key:{remoteJid:'customer@lid',fromMe:false,id:'incoming'},messageTimestamp:Math.floor(created.getTime()/1000)}]},'customer@lid');expect(socket.sendMessage).not.toHaveBeenCalled();
+});
+
+it('stopped numbers are rejected from routing metadata before reading the message body or showing typing',async()=>{
+ const original=mock.query.getMockImplementation()!;
+ mock.query.mockImplementation(async(sql:string,params?:any[])=>sql.includes('/* chat privacy */')?{rows:[{}],rowCount:1}:original(sql,params));
+ const content=vi.fn(()=>({conversation:'NEVER_READ_THIS_CONTENT'}));
+ const message={key:{id:'private',remoteJid:'923001234567@s.whatsapp.net'}};
+ Object.defineProperty(message,'message',{get:content});
+ mock.sockets[0].emit('messages.upsert',{type:'notify',messages:[message]});
+ await vi.waitFor(()=>expect(mock.query.mock.calls.some(([sql])=>sql.includes('/* chat privacy */'))).toBe(true));
+ expect(content).not.toHaveBeenCalled();expect(mock.inboxSave).not.toHaveBeenCalled();expect(mock.receive).not.toHaveBeenCalled();expect(mock.sockets[0].readMessages).not.toHaveBeenCalled();expect(mock.sockets[0].sendPresenceUpdate).not.toHaveBeenCalled();
+ expect(JSON.stringify(mock.query.mock.calls)).not.toContain('NEVER_READ_THIS_CONTENT');
+});
+it('alternate phone metadata is mapped before checking a stopped LID',async()=>{
+ const original=mock.query.getMockImplementation()!;
+ mock.query.mockImplementation(async(sql:string,params?:any[])=>sql.includes('/* chat privacy */')?{rows:[{}],rowCount:1}:original(sql,params));
+ mock.sockets[0].emit('messages.upsert',{type:'notify',messages:[{key:{id:'alias-private',remoteJid:'123456789123@lid',remoteJidAlt:'923001234567@s.whatsapp.net'},message:{conversation:'DO_NOT_STORE'}}]});
+ await vi.waitFor(()=>expect(mock.query.mock.calls.some(([sql])=>sql.includes('/* chat privacy */'))).toBe(true));
+ expect(mock.query.mock.calls.find(([sql])=>sql.startsWith('insert into chat_phone_addresses'))?.[1]).toEqual(['revive','account','123456789123@lid','923001234567']);expect(mock.inboxSave).not.toHaveBeenCalled();
+});
+it('a privacy stop also cancels scheduled read receipts and typing',async()=>{
+ vi.useFakeTimers();let stopped=false;const original=mock.query.getMockImplementation()!;
+ mock.query.mockImplementation(async(sql:string,params?:any[])=>sql.includes('/* chat privacy */')?{rows:stopped?[{}]:[],rowCount:stopped?1:0}:original(sql,params));
+ mock.sockets[0].emit('messages.upsert',{type:'notify',messages:[{key:{id:'before-stop',remoteJid:'923001234567@s.whatsapp.net'},message:{conversation:'Before stop'}}]});
+ await vi.advanceTimersByTimeAsync(500);expect(mock.inboxSave).toHaveBeenCalled();stopped=true;await vi.advanceTimersByTimeAsync(1000);
+ expect(mock.sockets[0].readMessages).not.toHaveBeenCalled();expect(mock.sockets[0].sendPresenceUpdate).not.toHaveBeenCalled();
 });

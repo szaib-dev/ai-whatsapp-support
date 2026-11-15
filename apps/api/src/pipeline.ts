@@ -24,6 +24,7 @@ export interface SessionBinding {
 }
 export interface Store {
   resolve(session: string): Promise<SessionBinding>;
+  guard(binding:SessionBinding,event:Incoming,work:()=>Promise<void>):Promise<unknown>;
   load(binding: SessionBinding, event: Incoming): Promise<Context | null>;
   claim(c: Context, event: Incoming): Promise<boolean>;
   finalize(
@@ -95,31 +96,34 @@ export class MessagePipeline {
       const current = await this.store.resolve(session);
       if (JSON.stringify(current) !== JSON.stringify(socket.binding))
         throw new TenantMismatch("Session binding changed");
-      const c = await this.store.load(current, event);
-      if (!c) return;
-      validateContext(c, session);
-      if (!(await this.store.claim(c, event))) return;
-      let answer: string | null = null;
-      let handoff=false,calendar=false;
-      if (
-        c.conversation.mode === "active" &&
-        !c.contact.ai_opt_out &&
-        c.revision.content.aiEnabled
-      ) {
-        try {
-          answer = explicitHandoff(event.text)?null:await this.appointments?.reply(c,event.text,event.id) ?? null;
-          calendar=answer!==null;
-          if(answer===null){const decision=await automaticResponse(c,event.text,this.ai);answer=decision.reply;handoff=decision.handoff;}
-        } catch {
-          answer = null;
+      const work=async()=>{
+        const c = await this.store.load(current, event);
+        if (!c) return;
+        validateContext(c, session);
+        if (!(await this.store.claim(c, event))) return;
+        let answer: string | null = null;
+        let handoff=false,calendar=false;
+        if (
+          c.conversation.mode === "active" &&
+          !c.contact.ai_opt_out &&
+          c.revision.content.aiEnabled
+        ) {
+          try {
+            answer = explicitHandoff(event.text)?null:await this.appointments?.reply(c,event.text,event.id) ?? null;
+            calendar=answer!==null;
+            if(answer===null){const decision=await automaticResponse(c,event.text,this.ai);answer=decision.reply;handoff=decision.handoff;}
+          } catch {
+            answer = null;
+          }
         }
-      }
-      finalized = true;
-      await this.store.finalize(c, event, answer, async () => {
-        if (this.sockets.get(session) !== socket)
-          throw new TenantMismatch("Socket changed");
-        return socket.transport.send(c.contact.identity, answer!);
-      },{handoff,calendar});
+        finalized = true;
+        await this.store.finalize(c, event, answer, async () => {
+          if (this.sockets.get(session) !== socket)
+            throw new TenantMismatch("Socket changed");
+          return socket.transport.send(c.contact.identity, answer!);
+        },{handoff,calendar});
+      };
+      await this.store.guard(current,event,work);
     } catch (error) {
       if (error instanceof TenantMismatch) await this.store.security(session);
       if (!finalized && error instanceof Error && !(error instanceof TenantMismatch)) Object.assign(error, { safeToRetry: true });
