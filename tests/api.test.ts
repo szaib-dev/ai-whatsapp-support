@@ -698,3 +698,35 @@ it('database backstops reject legacy direct message/inbox writes for stopped num
  await db.query('update status_portal_logins set enabled=false where organization_id=$1',[f.org]);
  expect((await app.inject({method:'PUT',url:'/status-api/chat-controls',headers:f.headers,payload:{phone:'923001234567',stopped:false}})).statusCode).toBe(403);
 });
+
+it.each(['forwarded','quoted','line-quoted','line-fragment','short-result','legacy-short','bare-code'])('appointment extraction sanitizes the actual outgoing %s Calendar payload',async style=>{
+ const f=await appointmentFixture();
+ const privateReply=['short-result','legacy-short'].includes(style)?'BUSY_SLOT': 'Your appointment is booked for\nPRIVATE_GOOGLE_SLOT_CANARY on 24 November at 11 am.\nCONFIRM ABC123';
+ f.c.history.push({organization_id:f.c.organization_id,conversation_id:f.c.conversation.id,sender:'ai',...(style==='legacy-short'?{}:{ai_context_source:'calendar'}),content:privateReply});
+ const forwarded=style==='bare-code'?'Reference code: ABC123':style==='line-fragment'?privateReply.split('\n')[1]:style==='line-quoted'?privateReply.split('\n').map(line=>'> '+line).join('\n'):style==='quoted'?'"'+privateReply+'"':'Forwarded: '+privateReply;
+ const fetch=vi.spyOn(globalThis,'fetch').mockResolvedValue({ok:true,json:async()=>({choices:[{message:{content:JSON.stringify({startLocal:null,missing:'both'})}}]})} as any);
+ try{
+  await new AppointmentAssistant(f.google).reply(f.c,'Book an appointment tomorrow at 2 pm.\n'+forwarded+'\nCONFIRM ABC123 or CANCEL FED456',id());
+  expect(fetch).toHaveBeenCalledTimes(1);
+  const payload=JSON.parse(fetch.mock.calls[0][1]!.body as string),user=JSON.parse(payload.messages[1].content);
+  expect(JSON.stringify(payload)).not.toMatch(/PRIVATE_GOOGLE_SLOT_CANARY|BUSY_SLOT|ABC123|FED456/);
+  expect(user.message).toContain('Book an appointment tomorrow at 2 pm.');
+  expect(user.message).toContain(style==='bare-code'?'handled privately':'omitted');expect(f.google.create).not.toHaveBeenCalled();
+ }finally{fetch.mockRestore();}
+});
+
+it('sanitized Calendar quotes preserve proposal, explicit confirmation and duplicate prevention',async()=>{
+ const f=await appointmentFixture(),secret='PRIVATE_GOOGLE_PREVIOUS_SLOT',assistant=new AppointmentAssistant(f.google),event=id();
+ f.c.history.push({organization_id:f.c.organization_id,conversation_id:f.c.conversation.id,sender:'ai',ai_context_source:'calendar',content:'Your previous appointment is booked for '+secret+'.'});
+ const start=new Date(f.proposal.starts_at).toISOString().slice(0,16);
+ const fetch=vi.spyOn(globalThis,'fetch').mockResolvedValue({ok:true,json:async()=>({choices:[{message:{content:JSON.stringify({startLocal:start,missing:'both'})}}]})} as any);
+ try{
+  const offered=await assistant.reply(f.c,'Book an appointment tomorrow at 2 pm. Forwarded: Your previous appointment is booked for '+secret+'.',event);
+  expect(offered).toContain('CONFIRM ');expect(f.google.create).not.toHaveBeenCalled();
+  const payload=JSON.parse(fetch.mock.calls[0][1]!.body as string);expect(JSON.stringify(payload)).not.toContain(secret);expect(JSON.stringify(payload)).toContain('tomorrow at 2 pm');
+  const request=(await db.query<any>('select * from appointment_requests where organization_id=$1 and source_event=$2',[f.c.organization_id,event])).rows[0];expect(request.status).toBe('proposed');
+  await assistant.reply(f.c,'CONFIRM '+confirmationCode(request.id),id());await assistant.reply(f.c,'CONFIRM '+confirmationCode(request.id),id());
+  expect(f.google.create).toHaveBeenCalledTimes(1);expect(fetch).toHaveBeenCalledTimes(1);
+  expect((await db.query<any>('select status from appointment_requests where id=$1',[request.id])).rows[0].status).toBe('booked');
+ }finally{fetch.mockRestore();}
+});

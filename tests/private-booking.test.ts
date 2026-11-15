@@ -2,6 +2,7 @@ import {it,expect,vi,afterEach} from 'vitest';
 import {DeepSeek,conversationPrompt,prompt,type Context} from '../apps/api/src/ai.js';
 import {externalAiContext} from '../apps/api/src/ai-context.js';
 import {bookingReply,type BookingState} from '../apps/api/src/booking-replies.js';
+import * as basicReplies from '../apps/api/src/basic-replies.js';
 import {defaultKnowledge} from '../apps/api/src/knowledge.js';
 const secret='CALENDAR_ONLY_CANARY_34c7';
 function context():Context{return {organization_id:'clinic',conversation:{organization_id:'clinic',id:'chat',account_id:'account',contact_id:'person',mode:'active'},account:{organization_id:'clinic',id:'account',session_id:'session',status:'connected',authenticated_jid:'clinic@s.whatsapp.net'},contact:{organization_id:'clinic',id:'person',identity:'person@lid',ai_opt_out:false},revision:{organization_id:'clinic',id:'revision',content:{...defaultKnowledge(),businessName:'Clinic',description:'We open at 9am.'}},history:[{organization_id:'clinic',conversation_id:'chat',sender:'customer',ai_context_source:'user',content:'I want an appointment tomorrow'},{organization_id:'clinic',conversation_id:'chat',sender:'ai',ai_context_source:'calendar',content:secret},{organization_id:'clinic',conversation_id:'chat',sender:'ai',content:'LEGACY_PRIVATE_HISTORY'},{organization_id:'other',conversation_id:'other',sender:'customer',ai_context_source:'user',content:'OTHER_CLINIC_DATA'},{organization_id:'clinic',conversation_id:'chat',sender:'customer',ai_context_source:'user',content:'CONFIRM ABC123'}],memories:[{organization_id:'clinic',contact_id:'person',kind:'summary',ai_context_source:'user',content:secret},{organization_id:'clinic',contact_id:'person',kind:'preferred_name',ai_context_source:'calendar',content:secret},{organization_id:'clinic',contact_id:'person',kind:'preferred_name',ai_context_source:'user',content:'{"name":"Ali"}'}]};}
@@ -22,4 +23,23 @@ it.each(['English','Roman Urdu','Urdu'])('routine booking replies are localized,
  const states:BookingState[]=['available','alternative','unavailable','closed','date','time','unclear','confirmed','failed','uncertain','confirm','handoff','cancelled'];
  for(const state of states){const a=bookingReply(state,language,'event',{slot:'Monday 3 PM',code:'ABC123'});expect(a).toBe(bookingReply(state,language,'event',{slot:'Monday 3 PM',code:'ABC123'}));expect(a).not.toMatch(/Google|API|database|timezone|—/);if(language==='Urdu')expect(a).toMatch(/[\u0600-\u06ff]/);if(['available','alternative','confirm'].includes(state))expect(a).toContain('CONFIRM ABC123');}
  expect(new Set(Array.from({length:20},(_,i)=>bookingReply('time',language,String(i)))).size).toBeGreaterThan(1);
+});
+
+it.each(['forwarded','quoted','line-quoted','line-fragment','short-result','legacy-short','bare-code'])('every DeepSeek entry point sanitizes actual %s Calendar payloads and correction text',async style=>{
+ const previous=process.env.DEEPSEEK_API_KEY;process.env.DEEPSEEK_API_KEY='synthetic-test-key';
+ // Exercise basic()'s external classifier path rather than its local template shortcut.
+ const classify=vi.spyOn(basicReplies,'localIntent').mockReturnValue('other');
+ const c=context(),privateReply=['short-result','legacy-short'].includes(style)?'BUSY_SLOT':'Your appointment is booked for\nPRIVATE_GOOGLE_SLOT_CANARY on 24 November at 11 am.\nCONFIRM ABC123';
+ c.history.push({organization_id:c.organization_id,conversation_id:c.conversation.id,sender:'ai',...(style==='legacy-short'?{}:{ai_context_source:'calendar'}),content:privateReply});
+ const quoted=style==='bare-code'?'Reference code: ABC123':style==='line-fragment'?privateReply.split('\n')[1]:style==='line-quoted'?privateReply.split('\n').map(line=>'> '+line).join('\n'):style==='quoted'?'"'+privateReply+'"':'Forwarded: '+privateReply;
+ const current='Please clarify this note: '+quoted+' CONFIRM ABC123 or CANCEL FED456';
+ const bodies:string[]=[];vi.stubGlobal('fetch',vi.fn(async(_url:any,options:any)=>{
+  bodies.push(options.body);const system=JSON.parse(options.body).messages[0].content;
+  return {ok:true,json:async()=>({choices:[{message:{content:system.startsWith('You select')?'{"factId":null}':system.startsWith('Classify')?'{"intent":"other"}':'{"reply":"Please ask our team.","handoff":false}'}}]})};
+ }));
+ try{
+  const ai=new DeepSeek();await ai.respond(c,current);await ai.select(c,current);await ai.basic(c,current);await ai.decide(c,current,quoted+' CONFIRM ABC123');
+  expect(bodies).toHaveLength(4);
+  for(const body of bodies){expect(body).not.toMatch(/PRIVATE_GOOGLE_SLOT_CANARY|BUSY_SLOT|ABC123|FED456|CALENDAR_ONLY_CANARY/);expect(body).toContain('Please clarify this note');expect(body).toContain(style==='bare-code'?'handled privately':'omitted');}
+ }finally{classify.mockRestore();if(previous===undefined)delete process.env.DEEPSEEK_API_KEY;else process.env.DEEPSEEK_API_KEY=previous;}
 });

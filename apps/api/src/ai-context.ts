@@ -8,4 +8,25 @@ export function externalAiContext(c:Context):Context{
 }
 export function customerBookingMessages(c:Context){return externalAiContext(c).history.filter(m=>m.sender==='customer'&&!/\b(?:CONFIRM|CANCEL)\s+[A-F\d]{6}\b/i.test(m.content));}
 
-export function externalCustomerText(text:string,c?:Context){for(const m of c?.history||[]){if((m.ai_context_source==='calendar'||(m.sender!=='customer'&&m.ai_context_source!=='assistant'))&&m.content.length>=16)text=text.replaceAll(m.content,'[private booking response omitted]');}return text.replace(/\b(?:CONFIRM|CANCEL)\s+[A-F\d]{6}\b/gi,'[booking confirmation handled privately]');}
+export function externalCustomerText(text:string,c?:Context){
+ const escape=(value:string)=>value.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+ const codes=new Set<string>();
+ for(const m of c?.history||[]){
+  for(const code of m.content.matchAll(/\b(?:CONFIRM|CANCEL)\s+([A-F\d]{6})\b/gi))codes.add(code[1].toUpperCase());
+  const calendar=m.ai_context_source==='calendar';
+  if(!calendar&&!(m.sender!=='customer'&&m.ai_context_source!=='assistant'))continue;
+  // Forwarded text can add quote prefixes/line breaks. Match only known protected
+  // content, leaving independently authored dates/preferences available to booking.
+  const fragments=calendar?[m.content,...m.content.split(/\r?\n/)]:[m.content];
+  for(const fragment of fragments){
+   const value=fragment.trim();if(!value)continue;
+   let pattern=value.split(/\s+/).map(escape).join('(?:\\s|>)+');
+   if(value.length<16)pattern=`(?<![\\p{L}\\p{N}])${pattern}(?![\\p{L}\\p{N}])`;
+   text=text.replace(new RegExp(pattern,'giu'),'[private booking response omitted]');
+  }
+ }
+ text=text.replace(/\b(?:CONFIRM|CANCEL)\s+[A-F\d]{6}\b/gi,'[booking confirmation handled privately]');
+ // Known codes remain private when copied without their CONFIRM/CANCEL command.
+ for(const code of codes)text=text.replace(new RegExp(`\\b${code}\\b`,'gi'),'[booking confirmation handled privately]');
+ return text;
+}
