@@ -1,108 +1,102 @@
-# Codetic AI automatic deployment
+# Codetic AI CI/CD on the small VPS
 
-Repository: `szaib-dev/ai-whatsapp-support` · VPS: `193.181.223.127` · user: `szb8480` · checkout: `/opt/codetic`.
+Repository: szaib-dev/ai-whatsapp-support (public). VPS: 193.181.223.127, Ubuntu 24.04, user szb8480, checkout /opt/codetic. Capacity at setup: **1.6 GiB RAM, 2 GiB swap, 5.3 GB free disk**.
 
-## What happens on push
+## Hosted builds and streaming deployment
 
-`.github/workflows/ci.yml` validates pushes to `main`, pull requests and manual workflow runs. Tests, lint, production build, type checks, dependency audit, shell deployment tests and Compose-template validation must succeed. Only a successful `main` push/manual run can enter the SSH deployment job. Pull requests never deploy. The workflow has read-only GitHub contents permissions.
+Main pushes and manual main runs execute tests, lint, build, types, audit, deployment regression tests and Compose validation on GitHub's standard ubuntu-latest hosted runner. Pull requests validate only. **No self-hosted runner is installed or used; PR code never runs on the VPS.**
 
-The deployment uses the existing SSH service on port 22, a dedicated Ed25519 identity, a pinned VPS host key and a forced command accepting only `deploy FULL_COMMIT_SHA`. It does not use passwords, disable host verification, expose credentials in command arguments, or open any new port. Repository source fetch uses a separate **read-only** GitHub deploy key. Existing SSH access and other authorized keys are preserved.
+After validation, the hosted deployment job builds API then web sequentially in an isolated Buildx builder, with solver parallelism 2. Images carry the exact commit revision and ownership label net.codetic.cicd=szaib-dev/ai-whatsapp-support. Setup selects the VPS architecture, linux/amd64 or linux/arm64. Only public frontend values are supplied as build arguments; no production environment file, SSH key or private credential is sent to a build.
 
-GitHub concurrency does not cancel an active deployment. A VPS `flock` also serializes manual and CI deployments; a remote deployment still holding the lock cannot be bypassed by another workflow. Superseded commits are skipped rather than replacing a newer `main`. GitHub can replace pending jobs in a concurrency group; latest validated main is the desired deployed state.
+The runner streams a size header followed by compressed Docker images over pinned SSH. Docker loads directly from stdin: **no compilation, Docker build, saved archive or new build cache on the VPS**. No registry, registry token, persistent image artifact or extra subscription is required. Both images are transferred; only affected containers are recreated. This trades some transfer for a complete release when local runtime configuration also selects a service.
 
-The restricted SSH wrapper is installed at `/usr/local/lib/codetic/ssh-entrypoint.sh`. Under its lock it fetches main, verifies the exact requested SHA, and runs that commit's deployment script. It does not accept arbitrary shell commands or an unvalidated branch. Protect write access to main: trusted main code necessarily has application/deployment authority.
+The hosted job prunes only its isolated builder cache; setup-buildx removes its builder/state during job cleanup, and the ephemeral runner is discarded. No persistent Actions image/cache artifact accumulates. Standard hosted runners for this public repository use GitHub's public-repository allowance; no paid larger runner is selected.
 
-## One-time setup: one command block
+Source changes since the last successful release and effective Compose hashes determine service replacement. Frontend-only releases leave the WhatsApp worker running. First deployment conservatively updates both containers; shared package changes select both. Documentation/workflow-only releases do not restart containers after the baseline.
 
-Prerequisites: the existing production api/web containers are already running from `/opt/codetic`; `.env.production`, the trusted database CA, reviewed migration ledger and existing `compose.vps.yaml` are correct. This is an update pipeline, not a replacement first-time infrastructure installer. GitHub-hosted runners must be able to reach your **existing** SSH endpoint; this setup does not change firewall, SSH daemon, Cloudflare Access or tunnel rules. If SSH is intentionally restricted, arrange access through your existing access policy during initial setup.
+## One-time setup or upgrade
 
-Paste this **in your VPS terminal as `szb8480`**, not root or Windows PowerShell:
+In the existing VPS terminal as szb8480, with production running and existing Docker access, paste this single block:
 
-```bash
+~~~bash
 set -Eeuo pipefail
 cd /opt/codetic
 git fetch origin main
 git merge --ff-only origin/main
 bash scripts/setup-cicd.sh
-```
+~~~
 
-The script installs client utilities (`gh`, `jq`, OpenSSH client, util-linux), checks Docker access, creates dedicated keys if missing, installs the forced-command wrapper, adds only its own authorized key, pins GitHub/VPS host keys, adds a read-only repository deploy key, stores the Actions secrets and dispatches the initial workflow. It does not print private keys or change `.env.production`. If Docker group membership is needed, it activates it for the setup session. **Docker access is root-equivalent**, so this account, its SSH access and main-branch write permissions must be restricted to trusted administrators.
+Prerequisites: existing .env.production, trusted database CA, reviewed migration ledger and **untracked compose.vps.yaml**. Setup may request your normal sudo password to install client utilities and the restricted SSH wrapper. It never edits sudoers, grants passwordless sudo, adds Docker-group membership, installs a runner or changes firewall/SSH/tunnel configuration. Missing Docker access stops setup for administrator review. Existing Docker access is root-equivalent; restrict this account and main writes to trusted administrators.
 
-If GitHub CLI is not already authenticated, the script asks you to complete its one-time browser/device login. Use an account with administration access to this repository and permission to create deploy keys/Actions secrets; authorize any required organization SSO. This interactive authentication is part of initial setup, not every deployment. If the script created the CLI login, it logs that session out after configuring secrets and dispatching the workflow; an existing CLI login is left alone. The dedicated read-only Git key continues to work without that CLI token. Private keys stay mode 0600 outside the checkout, never inside Git.
+Complete the one-time GitHub browser/device login with a repository administrator account. Setup creates dedicated keys when absent, adds a read-only repository deploy key, pins host keys, installs the forced command and uploads Actions secrets without printing private keys. A CLI login created by setup is logged out afterwards; an existing login remains. Existing authorized keys are preserved. Private keys stay mode 0600 outside Git.
 
-Dirty tracked files cause setup/deployment to stop rather than overwrite operator changes. Resolve real source changes through Git before setup. `compose.vps.yaml` is intentionally ignored as **VPS-local configuration**; no sample is copied over it. Existing `.env.production`, certificates, keys, volumes and database records are preserved.
+Setup reads effective Compose build args and uploads only the public browser values below and architecture as repository variables. It never sources, uploads, prints or overwrites the production environment file/local override. Rerun setup after intentionally changing public browser build values. Never put a service-role key, database URL, encryption key or Google secret in a repository variable or browser build argument.
 
 ## Exact GitHub settings
 
-Repository **Settings → Secrets and variables → Actions → Repository secrets**:
+**Settings → Actions → General:** enable Actions and allow actions/checkout, actions/setup-node, docker/setup-qemu-action and docker/setup-buildx-action. Keep workflow permissions at **read repository contents** and fork secrets disabled. No packages-write permission or paid environment is required.
 
-| Secret | Initial setup creates it from |
+**Settings → Secrets and variables → Actions → Repository secrets**, created by setup:
+
+| Name | Purpose |
 | --- | --- |
-| `VPS_SSH_KEY` | Dedicated private Ed25519 key, uploaded directly using `gh secret set` |
-| `VPS_KNOWN_HOSTS` | The VPS's own `/etc/ssh/ssh_host_ed25519_key.pub`, paired with `193.181.223.127` |
+| VPS_SSH_KEY | Dedicated Ed25519 deployment identity |
+| VPS_KNOWN_HOSTS | Pinned VPS public host key |
 
-Do not use the host key obtained by an unauthenticated `ssh-keyscan`. On a genuine VPS host-key change, verify the new key through the VPS console and rerun setup; do not bypass strict checking. These are repository secrets, not GitHub Variables and not environment secrets. No `production` environment or paid environment-protection feature is required.
+**Repository variables**, also created by setup:
 
-Repository **Settings → Actions → General**:
+| Name | Source |
+| --- | --- |
+| NEXT_PUBLIC_SUPABASE_URL | Existing effective web build arg |
+| NEXT_PUBLIC_SUPABASE_ANON_KEY | Existing public anon/publishable browser key |
+| NEXT_PUBLIC_API_URL | Existing effective web build arg |
+| NEXT_PUBLIC_SITE_URL | Existing effective web build arg |
+| DEPLOY_PLATFORM | Existing Docker architecture |
 
-- Enable Actions for this repository and permit GitHub-owned `actions/checkout` and `actions/setup-node`.
-- Workflow permissions: **Read repository contents**. Do not grant unnecessary write permissions or PR-creation rights.
-- Keep fork pull-request secrets disabled. Require approval for workflows from outside collaborators as appropriate. Never run untrusted PR code on the VPS.
+Setup queues the first workflow. Manually use **Actions → Validate and deploy → Run workflow → main** when needed. Runs before setup fail safely on missing variables/secrets. Protect main, disable force pushes/deletion and require validate before merging. Enable your Actions failure notifications.
 
-Repository **Settings → Rules → Rulesets** (or Branch protection), when available on your plan:
+## Disk budget and safe cleanup
 
-- Target `main`; disallow force pushes and branch deletion.
-- Require the **validate** check from **Validate and deploy** before merging. Do not require the post-merge deployment job as a pre-merge check.
-- Restrict pushes/merges to trusted maintainers; add review requirements appropriate to your team.
+Before import, cleanup inventories all containers and owned CI images under the deployment lock. It preserves:
 
-GitHub **Actions → Validate and deploy → Run workflow → main** manually revalidates/redeploys latest main. The setup script queues the first run itself. A job already triggered before secrets are installed can fail safely at SSH setup; use the queued fresh run after setup.
+- Images referenced by **any running or stopped container**, including unrelated services.
+- Actual API and web images serving before the deployment attempt.
+- One previous successful image per service, pinned in .deploy/rollback-api.image and .deploy/rollback-web.image.
 
-GitHub-hosted Actions uses the repository's included allowance/public-repository eligibility; no registry, SaaS deployment subscription or extra server is introduced. For private repositories, set an Actions spending limit/budget of zero if you require a strict no-charge policy. Exhausting the included allowance can stop Actions until it resets; free unlimited private build minutes cannot be promised. Enable your GitHub Actions failure email/web notifications under your personal notification settings. Job failures and rollback outcomes also appear in Actions logs/summary; no external email service is required.
+Only unused images with the exact Codetic CI ownership label are removal candidates. Removal uses Docker image rm with --no-prune and without force. Referenced or multi-tag images that Docker refuses to remove remain. Untagged parents, unlabelled/manual legacy images and unrelated images are not swept. Invalid retention metadata or failed inventory fails closed before import. Successful releases refresh pins only for changed images, then clean obsolete owned images again. Frontend-only releases preserve the backend's previous rollback pin.
 
-## Service selection and downtime
+The disk gate requires **twice the incoming uncompressed image sizes plus 512 MiB** available on Docker's filesystem before loading. This deliberately overestimates shared layers and allows staging/reserve space. If the budget exceeds available space, deployment stops before app shutdown and retains rollback images. Image-loading failures also leave existing containers running. This is a point-in-time gate: unrelated disk writers can consume space afterwards. Increase capacity rather than sacrificing the final rollback to force a release through.
 
-- The first successful pipeline deployment establishes a conservative baseline and may rebuild/recreate both application containers once.
-- Afterwards, changes in `apps/web` rebuild/recreate only `web`. API code, API Dockerfile, migrations or shared dependency/compiler inputs select `api`. Shared package files select both.
-- Effective Compose hashes also detect api/web runtime configuration changes, including the existing local override. State is based on the last **successful** deployment, so a failed build is not mistaken for a deployed release.
-- Docs/workflow-only changes do not restart application containers once the baseline exists.
-- Builds occur while old containers continue serving. Application images use commit-specific tags and previous actual image IDs are retained.
-- Application services are recreated explicitly using `--no-deps --no-build --pull never --wait`. There is no global `up`, `down`, volume deletion, pruning, `--remove-orphans`, API scaling or simultaneous blue/green WhatsApp worker.
-- API code changes incur the brief stop/start needed for a single worker. Frontend-only changes leave API transport running. Database credentials, session encryption key, saved WhatsApp auth, Calendar connections and durable inbox remain in the same database/configuration.
+No volume, container, network, system or global builder prune runs on the VPS. Existing default/shared build cache cannot be attributed safely to Codetic and remains untouched. Moving builds off-server prevents further Codetic build-cache growth. Old unlabelled images/default caches may require a one-time administrator ownership review if they already occupy most disk space. The pipeline never assumes everything unused on this shared VPS belongs to Codetic.
 
-The script always reads `compose.production.yaml` plus the existing `compose.vps.yaml` when present. `.deploy/images.yaml` overrides only api/web image references. It does **not** start, stop, build, pull or recreate Caddy, Cloudflare Tunnel/cloudflared, Asterisk or other services. It does not modify ports 3000/3101, tunnel routing, reverse proxy configuration, firewall, DNS or production secrets. Deliberate infrastructure/proxy changes remain outside this application deployer's scope.
+## Isolation, migrations and rollback
 
-## Database migrations and rollback
+Strict SSH host checking and the forced command deploy FULL_COMMIT_SHA remain. Under flock, the wrapper fetches main, accepts only the latest requested main SHA and runs that commit's script. GitHub concurrency does not cancel active deployments; the VPS lock also serializes manual attempts. Superseded releases may close the stream early and succeed; the receiver's result is authoritative.
 
-API builds include migration preflight tooling. The preflight checks the existing private migration ledger and content hashes, then finds unapplied migrations. `deploy/migration-policy.json` records reviewed normalized SHA-256 checksums and `backwardCompatible:true` for eligible migrations. When adding a migration, include its reviewed policy entry in the same code push. Declaring compatibility is a developer review obligation, not a claim that a regex can prove SQL semantics.
+Imported tags must match expected revision and ownership labels. Trusted main code has deployment authority; no public PR or self-hosted public-repository runner receives deployment credentials.
 
-Unreviewed, changed or incompatible pending migrations fail before the API stops. No silent baseline, reset, automatic down migration or destructive rollback is performed. Adopt legacy schemas once using the reviewed procedure in `DEPLOYMENT.md`, before enabling CD. The existing migration runner still provides transactions, checksums and a database advisory lock.
+Compose reads compose.production.yaml, existing untracked compose.vps.yaml when present and .deploy/images.yaml. Releases that attempt to track the local override are rejected. No copy, generated replacement, clean or reset overwrites it. Environment variables, encryption keys, WhatsApp sessions, database records and Calendar connections remain in existing config/database.
 
-If migrations are pending and approved, the API is stopped only after builds/preflight succeed. A one-shot container runs `node scripts/migrate.mjs` with the CMD overridden; it never starts a WhatsApp manager. Then the single API service is recreated. Existing worker shutdown and restart policies remain in force. Migrations that require breaking old-version compatibility need a separate maintenance/roll-forward design and are intentionally refused by this automatic path.
+Only explicit api/web lifecycle commands run with no dependencies, no builds, no pulls and bounded health waits. There is no global up/down, scaling or second WhatsApp worker. Caddy, Cloudflare Tunnel, Asterisk, volumes, ports and unrelated services remain untouched. API replacement incurs a brief single-worker stop/start. Runtime limits/swap are not overwritten; hosted builds do not imply unlimited application capacity on 1.6 GiB RAM.
 
-On an application migration/startup/public-health failure, the trap restores the prior tracked checkout and saved application image IDs, recreating only affected application services. Applied compatible database migrations remain; they are not reversed. `.env.production`, VPS-local overrides and volumes are not restored from Git or overwritten. A partial migration failure is rollback-safe only because every migration in the batch was explicitly reviewed as backward-compatible. The operator still needs tested backups and recovery practices; pipeline rollback is not a database backup.
+Read-only migration preflight checks the existing ledger/checksums. New SQL requires reviewed matching checksums and backwardCompatible:true in deploy/migration-policy.json. Changed, removed, incompatible or unreviewed SQL fails before API shutdown. An untracked database still requires the reviewed baseline procedure in DEPLOYMENT.md. Approved pending migrations stop only API and use a one-shot container whose CMD never starts a WhatsApp worker. Transactions and advisory locking remain.
 
-If rollback itself fails, the job reports failure and retains state/images for review instead of falsely claiming recovery. A powered-off VPS, exhausted disk, inaccessible database, revoked third-party access, invalid secrets or broken SSH cannot be repaired by CI. These failures require operator intervention; successful routine pushes require none.
+Compose health and HTTP-200 public checks at the frontend and API /ready must succeed, without an interactive Cloudflare challenge. Compatible migration/runtime/health failures restore the previous tracked checkout and actual image IDs, recreating only touched services. Applied compatible SQL is not reversed. Failed initial baselines are never recorded as successful. Logs report phase and rollback outcome. Cleanup failure after a healthy release is reported without rolling back the healthy app.
 
-## Health, records and troubleshooting
+Power, SSH, disk failures, revoked third-party access and database recovery can still require operator intervention. Image retention is not a database backup. Global readiness does not prove each clinic's phone authorization; clinics use /status for individual connection state.
 
-Public checks require HTTP 200, so redirects/challenges are not accepted as a healthy release. Each affected container must pass its Compose health check, with a bounded wait. The public website and `https://api.netawaz.pk/ready` are then checked through the existing tunnel with bounded retries. Public health endpoints must be reachable without a Cloudflare interactive challenge. The global API readiness check verifies DB/manager readiness; it does not promise every individual clinic's WhatsApp authorization is still valid. Clinics use `/status` for their own connection state.
+## Records and validation
 
-Deployment logs show commit, selected services, phase, result and rollback outcome, without dumping Compose's expanded environment or reading `.env` into logs. GitHub SSH key files are removed from the ephemeral runner on exit. Existing app log redaction is retained. `.deploy/` is ignored and private (umask 077); it contains the lock, current successful commit/config hashes, current image override and bootstrap script. Do not remove it during updates. No automatic image/volume cleanup is run; monitor disk space and perform reviewed cleanup that retains rollback images.
+Keep ignored/private .deploy state across releases: lock, successful commit/config hashes, image override, rollback pins and bootstrap script. Inspect without dumping secrets:
 
-On the VPS, inspect without printing secrets:
-
-```bash
+~~~bash
 cd /opt/codetic
 cat .deploy/current.json
 docker compose --env-file .env.production -f compose.production.yaml -f compose.vps.yaml -f .deploy/images.yaml ps api web
-```
+~~~
 
-Use the same three Compose files for manual application operations after CD adoption. A plain global `docker compose up` using a different project/override can revert image selection or touch infrastructure. Do not launch an additional worker against the production database from a laptop; the application's database lease deliberately prevents duplicate managers.
+Use those same Compose files for manual app operations after adoption instead of the old global-stack deploy helper. Do not start a second WhatsApp worker from a laptop against production.
 
-## Validation and limits
+The deployment test script runs isolated fixtures against real scripts: service selection, migrations, runtime/public-health rollback, failed baseline, low disk, failed image loading, bad image provenance, failed cleanup inventory, local override protection, stale commits and sequential hosted builds. It verifies protected-image retention and absence of VPS builds, broad pruning, force image deletion or unrelated lifecycle changes. Application tests/lint/types/build/audit and Compose/workflow syntax run separately. Fixtures are not a live VPS rollout; observe the first deployment after setup.
 
-`bash tests/deployment-ci.test.sh` exercises the real deployment script with isolated command fixtures: frontend-only update, API+migration update, frontend rollback, migration-failure rollback, preflight rejection, public-health rollback, failed initial baseline and stale-commit skip. It checks that secrets/local override remain, forbidden lifecycle commands are absent and no proxy/tunnel service is recreated. GitHub runs these tests as part of validation, alongside the application tests/builds and shell syntax checks.
-
-The fixtures do not claim a live SSH/VPS deployment. No private SSH key or GitHub settings access was supplied in this coding session, so the actual remote rollout must be observed after the one-time setup. The manual workflow and automatic push use the same validation/deployment path. Existing deployment, backups and Google verification guidance remains in `DEPLOYMENT.md` and `GOOGLE_VERIFICATION_CHECKLIST.md`.
-
-References: [GitHub concurrency](https://docs.github.com/en/actions/how-tos/writing-workflows/choosing-when-your-workflow-runs/control-the-concurrency-of-workflows-and-jobs), [Compose up flags](https://docs.docker.com/reference/cli/docker/compose/up/). Official documentation was checked during implementation.
+References: [compressed stdin loading](https://docs.docker.com/reference/cli/docker/image/load/), [image removal semantics](https://docs.docker.com/reference/cli/docker/image/rm/), [isolated hosted builders](https://docs.docker.com/build/ci/github-actions/configure-builder/), [builder-specific cache pruning](https://docs.docker.com/reference/cli/docker/buildx/prune/).

@@ -9,15 +9,10 @@ cd /opt/codetic
 sudo apt-get update
 sudo apt-get install -y gh jq openssh-client util-linux
 command -v docker >/dev/null
-# Docker access is root-equivalent. Restrict this account and protect main.
+# No sudoers changes or unattended sudo. Use the account's existing Docker access.
 if ! docker info >/dev/null 2>&1; then
- if id -nG | tr ' ' '\n' | grep -qx docker; then
-  echo 'Docker is unavailable despite group access. Restore the existing Docker service before setup.' >&2
-  exit 1
- fi
- sudo usermod -aG docker szb8480
- echo 'Activating Docker group membership for this setup session.'
- exec sg docker -c 'cd /opt/codetic && bash scripts/setup-cicd.sh'
+ echo 'Existing Docker access is required. Have the VPS administrator review access; no privileges were granted.' >&2
+ exit 1
 fi
 created_auth=0
 if ! gh auth status >/dev/null 2>&1; then gh auth login --hostname github.com --git-protocol ssh --skip-ssh-key --web; created_auth=1; fi
@@ -53,6 +48,19 @@ gh secret set VPS_SSH_KEY --repo "$repo" < "$key"
 awk '{print "193.181.223.127 " $1 " " $2}' /etc/ssh/ssh_host_ed25519_key.pub | gh secret set VPS_KNOWN_HOSTS --repo "$repo"
 # The CI private key is transferred directly to Actions secrets, never printed.
 # Keep its protected local copy for rotation; do not copy it into the repository.
+# Only values already compiled into the public browser bundle become Actions variables.
+# Compose reads the existing local override; never source or upload the production env file.
+for variable in NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_SUPABASE_ANON_KEY NEXT_PUBLIC_API_URL NEXT_PUBLIC_SITE_URL; do
+ docker compose --env-file .env.production -f compose.production.yaml -f compose.vps.yaml config --format json |
+  jq -erj --arg variable "$variable" '.services.web.build.args[$variable] | select(type == "string" and length > 0)' |
+  gh variable set "$variable" --repo "$repo"
+done
+case "$(docker info --format '{{.Architecture}}')" in
+ x86_64|amd64) platform=linux/amd64 ;;
+ aarch64|arm64) platform=linux/arm64 ;;
+ *) echo 'Unsupported VPS architecture.' >&2; exit 1 ;;
+esac
+printf '%s' "$platform" | gh variable set DEPLOY_PLATFORM --repo "$repo"
 echo 'SSH identity and pinned VPS host key installed in GitHub repository secrets.'
 echo 'Complete the exact repository/branch settings in CICD.md.'
 gh workflow run ci.yml --repo "$repo" --ref main

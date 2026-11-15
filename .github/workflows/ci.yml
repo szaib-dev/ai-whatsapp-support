@@ -27,7 +27,7 @@ jobs:
       - run: npm audit --omit=dev
       - name: Validate deployment scripts and template
         run: |
-          bash -n scripts/deploy-ci.sh scripts/setup-cicd.sh deploy/ssh-entrypoint.sh
+          bash -n scripts/deploy-ci.sh scripts/setup-cicd.sh scripts/build-ci-images.sh deploy/ssh-entrypoint.sh
           bash tests/deployment-ci.test.sh
           docker compose --env-file .env.production.example -f compose.production.yaml config --no-env-resolution --quiet
   deploy:
@@ -36,6 +36,27 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: arm64
+          cache-image: false
+      - uses: docker/setup-buildx-action@v4
+        id: builder
+        with:
+          buildkitd-config-inline: |
+            [worker.oci]
+              max-parallelism = 2
+      - name: Build images sequentially on GitHub
+        env:
+          CI_BUILDER: ${{ steps.builder.outputs.name }}
+          DEPLOY_SHA: ${{ github.sha }}
+          DEPLOY_PLATFORM: ${{ vars.DEPLOY_PLATFORM || 'linux/amd64' }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          NEXT_PUBLIC_API_URL: ${{ vars.NEXT_PUBLIC_API_URL }}
+          NEXT_PUBLIC_SITE_URL: ${{ vars.NEXT_PUBLIC_SITE_URL }}
+        run: bash scripts/build-ci-images.sh
       - name: Deploy validated commit using pinned SSH identity
         env:
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
@@ -52,10 +73,23 @@ jobs:
           [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
           printf '%s\n' "$VPS_SSH_KEY" > "$keyfile"
           printf '%s\n' "$VPS_KNOWN_HOSTS" > "$hostsfile"
-          ssh -T -i "$keyfile" -o IdentitiesOnly=yes -o BatchMode=yes \
-            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$hostsfile" \
-            -o ConnectTimeout=20 -o ServerAliveInterval=20 -o ServerAliveCountMax=6 \
-            szb8480@193.181.223.127 "deploy $DEPLOY_SHA"
+          image_bytes=$(docker image inspect --format '{{.Size}}' "codetic-api:$DEPLOY_SHA" "codetic-web:$DEPLOY_SHA" | awk '{sum+=$1} END {printf "%.0f",sum}')
+          # Header + gzip stream, without storing an archive on the VPS.
+          # A superseded release can close stdin early; the SSH receiver is authoritative.
+          set +e
+          { printf '%s\n' "$image_bytes"; docker image save "codetic-api:$DEPLOY_SHA" "codetic-web:$DEPLOY_SHA" | gzip -1; } | \
+            ssh -T -i "$keyfile" -o IdentitiesOnly=yes -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$hostsfile" \
+              -o ConnectTimeout=20 -o ServerAliveInterval=20 -o ServerAliveCountMax=6 \
+              szb8480@193.181.223.127 "deploy $DEPLOY_SHA"
+          transfer_status=("${PIPESTATUS[@]}")
+          set -e
+          exit "${transfer_status[1]}"
+      - name: Clean isolated hosted builder cache
+        if: always() && steps.builder.outcome == 'success'
+        env:
+          CI_BUILDER: ${{ steps.builder.outputs.name }}
+        run: docker buildx prune --builder "$CI_BUILDER" --force --max-used-space 256MB
       - name: Report deployment failure
         if: failure()
         run: |

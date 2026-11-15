@@ -18,6 +18,64 @@ record_success() {
   '{commit:$commit,config:{api:$api,web:$web}}' > .deploy/current.json.tmp
  mv .deploy/current.json.tmp .deploy/current.json
 }
+# Only explicitly owned CI images may be removed; Docker refuses referenced images.
+cleanup_images() {
+ local protected candidates id container_ids container service
+ protected="$old_api"$'\n'"$old_web"
+ for service in api web; do
+  if [[ -f ".deploy/rollback-$service.image" ]]; then
+   id="$(cat ".deploy/rollback-$service.image")" || return 1
+   [[ "$id" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+   protected+=$'\n'"$id"
+  fi
+ done
+ container_ids="$(docker ps -aq)" || return 1
+ for container in $container_ids; do
+  id="$(docker inspect --format '{{.Image}}' "$container")" || return 1
+  [[ "$id" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+  protected+=$'\n'"$id"
+ done
+ candidates="$(docker image ls --filter label=net.codetic.cicd=szaib-dev/ai-whatsapp-support --no-trunc --quiet)" || return 1
+ for id in $(sort -u <<< "$candidates"); do
+  [[ "$id" =~ ^sha256:[0-9a-f]{64}$ ]] || continue
+  if ! grep -Fxq "$id" <<< "$protected"; then
+   # No force, no parent pruning, no container/volume/system/global-builder prune.
+   docker image rm --no-prune "$id" || log "Cleanup retained referenced/multi-tag image $id"
+  fi
+ done
+}
+import_images() {
+ local image_bytes available required docker_root service metadata
+ IFS= read -r -t 120 image_bytes || { log 'Missing image stream size header.'; return 1; }
+ [[ "$image_bytes" =~ ^[1-9][0-9]{0,10}$ ]] || { log 'Invalid image stream size header.'; return 1; }
+ cleanup_images || { log 'Could not safely inventory images before import.'; return 1; }
+ docker_root="$(docker info --format '{{.DockerRootDir}}')"
+ available="$(df -PB1 "$docker_root" | awk 'END {print $4}')"
+ [[ "$available" =~ ^[0-9]+$ ]] || return 1
+ # Conservative import staging allowance plus 512 MiB headroom; never evict rollback.
+ required=$((2 * image_bytes + 536870912))
+ if (( available < required )); then
+  log "Insufficient Docker disk space: available=$available required=$required. Application left running; rollback images retained."
+  return 1
+ fi
+ docker image load
+ for service in api web; do
+  metadata="$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}} {{index .Config.Labels "net.codetic.cicd"}}' "codetic-$service:$target")"
+  [[ "$metadata" == "$target szaib-dev/ai-whatsapp-support" ]] || { log "Unexpected imported $service image provenance."; return 1; }
+ done
+}
+retain_rollback() {
+ local service old current
+ for service in api web; do
+  if [[ "$service" == api ]]; then old="$old_api"; else old="$old_web"; fi
+  current="$(docker image inspect --format '{{.Id}}' "$(if [[ "$service" == api ]]; then printf '%s' "$api_image"; else printf '%s' "$web_image"; fi)")"
+  [[ "$current" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+  if [[ "$current" != "$old" ]]; then
+   printf '%s\n' "$old" > ".deploy/rollback-$service.image.tmp"
+   mv ".deploy/rollback-$service.image.tmp" ".deploy/rollback-$service.image"
+  fi
+ done
+}
 check_public() {
  local url attempt status
  for url in https://codetic.netawaz.pk/ https://api.netawaz.pk/ready; do
@@ -92,6 +150,9 @@ main() {
  trap 'exit 130' INT
  trap 'exit 143' TERM
  phase=checkout
+ if git cat-file -e "$target:compose.vps.yaml" 2>/dev/null; then
+  log 'Refusing a release that tracks the VPS-local compose.vps.yaml.'; return 1
+ fi
  git merge-base --is-ancestor "$old_commit" "$target" || { log 'Target is not a forward release; automatic deployment refused.'; return 1; }
  changed="$(git diff --name-only "$old_commit" "$target")"
  git checkout --quiet -B main "$target"
@@ -103,14 +164,13 @@ main() {
  [[ "$(config_hash api)" == "$before_api" && ( -z "$saved_api" || "$saved_api" == "$before_api" ) ]] || api_changed=1
  [[ "$(config_hash web)" == "$before_web" && ( -z "$saved_web" || "$saved_web" == "$before_web" ) ]] || web_changed=1
  log "Release $target api_changed=$api_changed web_changed=$web_changed"
- phase=build
+ phase=import
  local api_image="$old_api" web_image="$old_web"
  [[ "$api_changed" != 1 ]] || api_image="codetic-api:$target"
  [[ "$web_changed" != 1 ]] || web_image="codetic-web:$target"
  write_images "$api_image" "$web_image"
- # Build while old containers serve traffic. No global up/down, pulls or pruning.
- if [[ "$api_changed" == 1 ]]; then compose build api; fi
- if [[ "$web_changed" == 1 ]]; then compose build web; fi
+ # GitHub builds both sequentially; import a gzip stream without a VPS archive/build.
+ import_images
  phase=configuration
  if [[ "$api_changed" == 1 ]]; then
   compose run --rm --no-deps -T api node scripts/production-check.mjs
@@ -137,9 +197,12 @@ main() {
  fi
  phase=public-health
  check_public
+ retain_rollback
  record_success "$target"
  phase=complete
  trap - EXIT HUP INT TERM
+ # Release is committed; cleanup failure must not roll back a healthy deployment.
+ cleanup_images || log 'WARNING: image cleanup deferred; application is healthy.'
  log "SUCCESS $target. Previous images retained: api=$old_api web=$old_web"
 }
 main "$@"
