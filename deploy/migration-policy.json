@@ -1,0 +1,54 @@
+{
+  "202611140001_isolation.sql": {
+    "sha256": "8ab3525ebc690c6709198ba557de00d7c0b32e7af4e93ee2bd29c70fc40910bf",
+    "backwardCompatible": true
+  },
+  "202611140002_whatsapp_auth.sql": {
+    "sha256": "47422741cea279a1ac167ed6c4fbd15aeb8f281d5b405764a36e9bf0c4145bc5",
+    "backwardCompatible": true
+  },
+  "202611140003_inbox_memory.sql": {
+    "sha256": "08d2c06b8be6e59b25cb6147f1ca80aaf70f129fc7d1e3c8b5381b0a4c6d8c99",
+    "backwardCompatible": true
+  },
+  "202611140004_controls.sql": {
+    "sha256": "6a3b5b110741c41a4f4826f32ff67671d5a2ee7080af3c8056d15ff3915068d3",
+    "backwardCompatible": true
+  },
+  "202611140005_active_identity.sql": {
+    "sha256": "ddc4325eaa569fc6ace4f0d64cd8c71731ec5ca733c53b66276281cf4fa7d130",
+    "backwardCompatible": true
+  },
+  "202611140006_live_updates.sql": {
+    "sha256": "dfb4719af98170c39b8aee484f92c418453713564e46d8c027297368d13dc49a",
+    "backwardCompatible": true
+  },
+  "202611140007_calendar.sql": {
+    "sha256": "92822313aa09ea3e140d1b9414aeb8f73687239b60536139af9aa3dfd56f30f6",
+    "backwardCompatible": true
+  },
+  "202611140008_owner_availability.sql": {
+    "sha256": "8b2b4ab0b964dece346ed829f2e042394b07aa55ea0281e57d000bc03e0dff3e",
+    "backwardCompatible": true
+  },
+  "202611140009_status_portal.sql": {
+    "sha256": "ae4956352169d07e0c5aaccbf52431bbb3de80b1bdcab7b40b679e0b7d986fc2",
+    "backwardCompatible": true
+  },
+  "202611140010_connection_recovery.sql": {
+    "sha256": "84ef144aa49eb2e461d395e550a88122eeee81e83b6513a20f81dcdc33949527",
+    "backwardCompatible": true
+  },
+  "202611140011_handoff_unread.sql": {
+    "sha256": "55ce5fb2066273474b505f25fdd07bb0f5cc2560475f6232aeed9ed26ecbd4a0",
+    "backwardCompatible": true
+  },
+  "202611140012_production.sql": {
+    "sha256": "9d796829314319e509379740a14eb8ab3a5137e1c1981a860da8d2fa1348ff94",
+    "backwardCompatible": true
+  },
+  "202611140013_ai_provenance.sql": {
+    "sha256": "ba1b10ed3666eba389558e2b7f4babd2dedcb353b753e3b897a5741e1dac168d",
+    "backwardCompatible": true
+  }
+}

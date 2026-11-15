@@ -12,3 +12,5 @@ deploy/secrets
 **/*.backup
 **/*.pem
 **/*.key
+.deploy
+compose.vps.yaml

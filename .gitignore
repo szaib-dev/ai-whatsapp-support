@@ -18,3 +18,7 @@ deploy/secrets/*
 backups/
 *.dump
 *.backup
+
+# VPS-local deployment configuration and state
+/compose.vps.yaml
+/.deploy/

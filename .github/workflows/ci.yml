@@ -1,8 +1,18 @@
-name: Validate
-on: [push, pull_request]
+name: Validate and deploy
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: codetic-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: false
 jobs:
-  test:
+  validate:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -11,7 +21,46 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
-      - run: npm run typecheck
       - run: npm run lint
       - run: npm run build
+      - run: npm run typecheck
       - run: npm audit --omit=dev
+      - name: Validate deployment scripts and template
+        run: |
+          bash -n scripts/deploy-ci.sh scripts/setup-cicd.sh deploy/ssh-entrypoint.sh
+          bash tests/deployment-ci.test.sh
+          docker compose --env-file .env.production.example -f compose.production.yaml config --no-env-resolution --quiet
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Deploy validated commit using pinned SSH identity
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_KNOWN_HOSTS: ${{ secrets.VPS_KNOWN_HOSTS }}
+          DEPLOY_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          keyfile="$RUNNER_TEMP/codetic-key"
+          hostsfile="$RUNNER_TEMP/codetic-known-hosts"
+          trap 'rm -f "$keyfile" "$hostsfile"' EXIT
+          test -n "$VPS_SSH_KEY" && test -n "$VPS_KNOWN_HOSTS"
+          [[ "$DEPLOY_SHA" =~ ^[0-9a-f]{40}$ ]]
+          printf '%s\n' "$VPS_SSH_KEY" > "$keyfile"
+          printf '%s\n' "$VPS_KNOWN_HOSTS" > "$hostsfile"
+          ssh -T -i "$keyfile" -o IdentitiesOnly=yes -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$hostsfile" \
+            -o ConnectTimeout=20 -o ServerAliveInterval=20 -o ServerAliveCountMax=6 \
+            szb8480@193.181.223.127 "deploy $DEPLOY_SHA"
+      - name: Report deployment failure
+        if: failure()
+        run: |
+          echo '::error::Deployment failed. Check the SSH phase and rollback outcome. Production secrets were not changed.'
+          echo 'Deployment failed. Inspect the SSH step for details and the rollback outcome.' >> "$GITHUB_STEP_SUMMARY"
+      - name: Report success
+        if: success()
+        run: echo 'Validated release deployed, or safely skipped when superseded by newer main. See SSH output for details.' >> "$GITHUB_STEP_SUMMARY"

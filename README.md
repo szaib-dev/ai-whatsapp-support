@@ -56,3 +56,7 @@ docker compose --env-file .env.production.example -f compose.production.yaml con
 ```
 
 [GOOGLE_VERIFICATION_CHECKLIST.md](GOOGLE_VERIFICATION_CHECKLIST.md) covers scopes, branding, verified domains, redirects, consent, demonstration and external approval steps. [PRODUCTION_AUDIT.md](PRODUCTION_AUDIT.md) records findings/changed file groups. [CALENDAR_SETUP.md](CALENDAR_SETUP.md) and [STATUS_PORTAL.md](STATUS_PORTAL.md) explain integration and clinic usage. Real HTTPS, provider approval, phone sync and restore drills must be verified on staging; unit tests/native builds do not establish those external outcomes.
+
+## Automatic deployment
+
+For the existing VPS and Cloudflare Tunnel setup, use [CICD.md](CICD.md). Its one-time setup enables validated main-branch deployment and service-specific updates while preserving the local Compose override and secrets. After adopting CD, use its three-file Compose command for manual app operations instead of the earlier whole-stack deploy helper.

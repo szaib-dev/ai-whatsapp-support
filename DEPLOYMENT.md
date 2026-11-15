@@ -198,3 +198,7 @@ Keep the existing `.env` and `apps/web/.env.local`. Run the existing Node-22 `np
 Before public release: real DNS/VPS/HTTPS verification, protected secrets and preserved key, reviewed backup retention plus restore drill, AI-provider processing/Limited Use review, operator approval of legal/deletion practices, Google project/domain/consent configuration and review submission, and an end-to-end staging test. The unofficial WhatsApp integration also requires the operator to review WhatsApp terms and operational/account risks; no official WhatsApp partnership or delivery SLA is claimed.
 
 Compose syntax and native production builds can be checked without a running Docker engine. A successful native build is **not** proof that these images have been built or booted on Ubuntu; run the build/start/Caddy validation commands above with Docker running. No VPS deployment, live certificate issuance or Google approval is claimed by this repository change.
+
+## Automatic deployment
+
+For the existing VPS and Cloudflare Tunnel setup, use [CICD.md](CICD.md). Its one-time setup enables validated main-branch deployment and service-specific updates while preserving the local Compose override and secrets. After adopting CD, use its three-file Compose command for manual app operations instead of the earlier whole-stack deploy helper.
