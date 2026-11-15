@@ -1,6 +1,6 @@
 # Google OAuth verification: Codetic AI
 
-Status: prepared for operator review and deployment, **not Google verified**. External steps below remain unchecked until performed and evidenced.
+Status updated 16 November 2026: application live and CI/CD working, **not Google verified**. Use [GOOGLE_OAUTH_SUBMISSION.md](GOOGLE_OAUTH_SUBMISSION.md) for the current targeted review, exact scope justifications, Cloud submission fields, observed Cloudflare 1010 blocker and short video script. Older unchecked audit items below are historical guidance, not a claim the live deployment is still unconfigured.
 
 ## 1. Public URLs
 
@@ -61,7 +61,7 @@ Google refresh tokens are AES-256-GCM-encrypted using the existing server key wi
 
 Available-calendar metadata is shown to authorized workspace owners. Free/busy checks are used for requested times. Event creation stores the time, title “Appointment” and internal booking identifiers, not the conversation body. The app reads its own created event to reconcile uncertain outcomes. Ordinary customers cannot ask the AI for a private event list or meeting count.
 
-**External AI disclosure:** independently authored customer requests and approved non-Calendar context go to DeepSeek. Calendar metadata, availability, events, responses and confirmation state remain backend-only. Migration 013 records message provenance; legacy generated replies and unknown summaries are excluded rather than guessed safe. All AI entry points apply the same boundary. Do not paste private calendar exports into user-authored rules or messages. Provider contractual practices for customer data still require review; no Google approval or provider audit is implied.
+**External AI disclosure:** independently authored customer requests and approved non-Calendar context go to DeepSeek. Calendar metadata, availability, events, responses and confirmation state are excluded from AI prompts. Proposed/confirmed appointment times are shared with the requesting customer through WhatsApp/Meta as the disclosed, consented booking feature. Migration 013 records message provenance; legacy generated replies and unknown summaries are excluded rather than guessed safe. All AI entry points apply the same boundary. Do not paste private calendar exports into user-authored rules or messages. Provider contractual practices for customer data still require review; no Google approval or provider audit is implied.
 
 ## 7. Demo: connection, calendar selection and booking
 
@@ -91,7 +91,7 @@ Use an empty test Google Calendar, two test businesses and synthetic conversatio
 
 ## 9. Outstanding release/policy issues
 
-- [ ] DNS, VPS access, public HTTPS and actual deployment have not been verified by this repository work.
+- [ ] Live deployment/CI is established. Independent public verification probes currently hit Cloudflare 403/error 1010; resolve the edge restriction before submission. See the current submission packet.
 - [ ] Google Cloud domain ownership, branding, production audience/status, scopes and redirect URIs need operator configuration and verification.
 - [ ] Confirm AI-provider terms and technical/account settings prohibit disallowed reuse of Google raw/derived data, including general-purpose model development, and support the disclosed retention/processing. If not, change the processing design/provider agreement before enabling production; do not set the release flag just to bypass the issue.
 - [ ] Approve the actual conversation/manual-deletion and backup retention policies. Currently there is no automatic conversation purge, whole-clinic deletion UI or fixed deletion SLA. Operator-assisted removal and backup-restore deletion handling must be operationally ready.
@@ -103,7 +103,7 @@ The software adds validation and disclosure; it cannot establish external contra
 
 ## Official guidance reviewed
 
-- [Google OAuth application verification help](https://support.google.com/cloud/answer/13464321) — this particular support page could not be retrieved in the local research session; recheck it before submission.
+- [Google OAuth application verification help](https://support.google.com/cloud/answer/13464321) — successfully reviewed again on 16 November 2026; the complete English OAuth consent flow must appear in the demonstration.
 - [Sensitive-scope verification](https://developers.google.com/identity/protocols/oauth2/production-readiness/sensitive-scope-verification) — public homepage/privacy, branding, verified domains, scope justification and demonstration requirements.
 - [Google API Services User Data Policy](https://developers.google.com/terms/api-services-user-data-policy) — Limited Use and permitted transfers/human access, including raw and derived data.
 - [Calendar authorization scopes](https://developers.google.com/workspace/calendar/api/auth) — exact scope capabilities and narrower alternatives.

@@ -602,10 +602,10 @@ it('admin server authorization requires verified Supabase identity and membershi
 it('production Calendar onboarding requires recorded affirmative data-use consent',async()=>{
  const restore=googleTestEnvironment(),before=process.env.NODE_ENV;state.user=alice;
  try{
-  const created=(await app.inject({method:'POST',url:`/organizations/${a}/calendar/invites`,headers,payload:{}})).json();const token=created.url.split('/').pop();const page=await app.inject({url:`/calendar/connect/${token}`});expect(page.statusCode).toBe(200);expect(page.body).toContain('/privacy');expect(page.body).toContain('data_use_consent');expect(page.body).toContain('DeepSeek');
+  const created=(await app.inject({method:'POST',url:`/organizations/${a}/calendar/invites`,headers,payload:{}})).json();const token=created.url.split('/').pop();const page=await app.inject({url:`/calendar/connect/${token}`});expect(page.statusCode).toBe(200);expect(page.body).toContain('/privacy');expect(page.body).toContain('data_use_consent');expect(page.body).toContain('DeepSeek');expect(page.body).toContain('WhatsApp/Meta');expect(page.body).toContain('clinic portal users');expect(page.body).toContain('excluded from AI prompts');expect(page.body).not.toContain('booking results remain on our backend');
   process.env.NODE_ENV='production';expect((await app.inject({method:'POST',url:`/calendar/connect/${token}/start`})).statusCode).toBe(400);
   const consented=await app.inject({method:'POST',url:`/calendar/connect/${token}/start`,payload:{data_use_consent:'approved'}});expect(consented.statusCode).toBe(302);expect(consented.headers['set-cookie']).toContain('Secure');
-  const flow=(await db.query<any>('select data_use_consented_at,disclosure_version from calendar_oauth_flows where invite_id=$1',[created.id])).rows[0];expect(flow.data_use_consented_at).toBeTruthy();expect(flow.disclosure_version).toBe('2026-11-14');
+  const flow=(await db.query<any>('select data_use_consented_at,disclosure_version from calendar_oauth_flows where invite_id=$1',[created.id])).rows[0];expect(flow.data_use_consented_at).toBeTruthy();expect(flow.disclosure_version).toBe('2026-11-16');
  }finally{if(before===undefined)delete process.env.NODE_ENV;else process.env.NODE_ENV=before;restore();}
 });
 it.each([['English','Book an appointment tomorrow at 2 pm'],['Roman Urdu','Mujhe kal 2 baje appointment chahiye'],['Urdu','کیا کل دو بجے وقت مل سکتا ہے؟']])('backend-checked booking proposals and confirmations are natural in %s',async(language,text)=>{
