@@ -31,7 +31,7 @@ check_public() {
 }
 rollback() {
  local result=$?
- trap - EXIT INT TERM
+ trap - EXIT HUP INT TERM
  [[ "$result" != 0 ]] || return 0
  log "FAILED phase=$phase commit=$target"
  if [[ "$code_changed" == 1 ]]; then
@@ -88,6 +88,7 @@ main() {
  saved_api="$(jq -r '.config.api // empty' .deploy/current.json 2>/dev/null || true)"
  saved_web="$(jq -r '.config.web // empty' .deploy/current.json 2>/dev/null || true)"
  trap rollback EXIT
+ trap 'exit 129' HUP
  trap 'exit 130' INT
  trap 'exit 143' TERM
  phase=checkout
@@ -138,7 +139,7 @@ main() {
  check_public
  record_success "$target"
  phase=complete
- trap - EXIT INT TERM
+ trap - EXIT HUP INT TERM
  log "SUCCESS $target. Previous images retained: api=$old_api web=$old_web"
 }
 main "$@"
