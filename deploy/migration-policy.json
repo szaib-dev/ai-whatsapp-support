@@ -54,5 +54,9 @@
   "202611160001_chat_privacy.sql": {
     "sha256": "95f697bc8fb665e3c8a4983819070fa0a58541626727b8bdd4c0d1a4cc5f6459",
     "backwardCompatible": true
+  },
+  "202611160002_advanced_appointments.sql": {
+    "sha256": "70aad03886bfc9bade23b7b72aeedae2c0b2e62885b197d8052d417ce44fd842",
+    "backwardCompatible": true
   }
 }

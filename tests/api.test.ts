@@ -88,6 +88,7 @@ beforeAll(async () => {
   await db.exec(readFileSync("supabase/migrations/202611140012_production.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611140013_ai_provenance.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611160001_chat_privacy.sql", "utf8"));
+  await db.exec(readFileSync("supabase/migrations/202611160002_advanced_appointments.sql", "utf8"));
   await db.query("insert into auth.users values($1),($2)", [alice, bob]);
   await db.query(
     "insert into organizations(id,name) values($1,'Revive'),($2,'Zorro')",
@@ -729,4 +730,96 @@ it('sanitized Calendar quotes preserve proposal, explicit confirmation and dupli
   expect(f.google.create).toHaveBeenCalledTimes(1);expect(fetch).toHaveBeenCalledTimes(1);
   expect((await db.query<any>('select status from appointment_requests where id=$1',[request.id])).rows[0].status).toBe('booked');
  }finally{fetch.mockRestore();}
+});
+
+async function managedFixture(enabled=true){
+ const f=await privacyFixture();
+ await db.query("insert into organization_members values($1,$2,'owner')",[f.org,alice]);
+ await db.query("insert into workspace_features(organization_id,feature_key,enabled) values($1,'advanced_appointments',$2)",[f.org,enabled]);
+ await db.query("insert into calendar_connections(organization_id,email,google_subject,calendar_id,calendar_name,timezone,token_ciphertext,scopes,weekdays,opens,closes) values($1,'team@example.com','subject','primary','Business','UTC','encrypted','scopes','{1,2,3,4,5,6,7}','00:00','23:59')",[f.org]);
+ const day=new Date(Date.now()+7*86400000).toISOString().slice(0,10);
+ return {...f,input:{requestKey:id(),title:'Consultation',customerName:'Customer',notes:'Private appointment notes',kind:'appointment',startsAt:day+'T10:00:00Z',endsAt:day+'T10:30:00Z'}};
+}
+function mockManagedGoogle(){
+ const events=new Map<string,any>();let fail=false;
+ const access=vi.spyOn(calendar,'calendarAccess').mockResolvedValue('test-token');
+ const remote=vi.spyOn(calendar,'googleCalendar').mockImplementation(async(_token,path,body:any,method)=>{
+  if(fail)throw Error('Provider timed out');
+  if(path.includes('?'))return {items:[]};
+  if(method==='DELETE'){events.delete(path.split('/').at(-1)!);return {}};
+  if(body){const key=body.id||path.split('/').at(-1)!;const event={...body,id:key,htmlLink:'https://calendar.google.com/event'};events.set(key,event);return event;}
+  const event=events.get(path.split('/').at(-1)!);if(!event)throw Object.assign(Error('Not found'),{status:404});return event;
+ });
+ return {events,remote,setFail:(value:boolean)=>{fail=value},restore:()=>{access.mockRestore();remote.mockRestore()}};
+}
+it('premium permissions default to locked, require an owner, isolate businesses and revoke server access',async()=>{
+ const f=await managedFixture(false);state.user=alice;
+ expect((await app.inject({url:'/status-api/schedule',headers:f.headers})).json().advancedAppointments).toBe(false);
+ for(const method of ['GET','POST'] as const)expect((await app.inject({method,url:'/status-api/appointments',headers:f.headers,...(method==='POST'?{payload:f.input}:{})})).statusCode).toBe(403);
+ expect((await app.inject({method:'PATCH',url:`/organizations/${f.org}/features/advanced_appointments`,headers,payload:{enabled:true}})).statusCode).toBe(200);
+ expect((await app.inject({url:'/status-api/schedule',headers:f.headers})).json().advancedAppointments).toBe(true);
+ state.user=bob;expect((await app.inject({method:'PATCH',url:`/organizations/${f.org}/features/advanced_appointments`,headers,payload:{enabled:false}})).statusCode).toBe(403);
+ state.user=alice;await app.inject({method:'PATCH',url:`/organizations/${f.org}/features/advanced_appointments`,headers,payload:{enabled:false}});
+ expect((await app.inject({url:'/status-api/appointments',headers:f.headers})).statusCode).toBe(403);
+ const basic=(await app.inject({url:'/status-api/schedule',headers:f.headers})).json();expect(basic.appointments).toBeDefined();expect(JSON.stringify(basic)).not.toContain('Private appointment notes');
+});
+it('manual create, idempotency, edit, reschedule, conflict prevention and cancellation preserve Google identity',async()=>{
+ const f=await managedFixture(),g=mockManagedGoogle();
+ try{
+  const create=await app.inject({method:'POST',url:'/status-api/appointments',headers:f.headers,payload:f.input});expect(create.statusCode,create.body).toBe(200);expect(create.json().ok).toBe(true);
+  const rows=(await db.query<any>('select * from appointment_requests where organization_id=$1',[f.org])).rows;expect(rows).toHaveLength(1);const row=rows[0];expect(row.status).toBe('booked');expect(g.events.size).toBe(1);
+  await app.inject({method:'POST',url:'/status-api/appointments',headers:f.headers,payload:f.input});expect((await app.inject({method:'POST',url:'/status-api/appointments',headers:f.headers,payload:{...f.input,title:'Changed after timeout'}})).statusCode).toBe(400);expect(g.events.size).toBe(1);expect((await db.query('select id from appointment_requests where organization_id=$1',[f.org])).rows).toHaveLength(1);
+  expect((await app.inject({method:'POST',url:'/status-api/appointments',headers:f.headers,payload:{...f.input,requestKey:id(),kind:'blocked'}})).statusCode).toBe(400);
+  const other=await managedFixture();expect((await app.inject({method:'PATCH',url:`/status-api/appointments/${row.id}`,headers:other.headers,payload:other.input})).statusCode).toBe(403);
+  const updated={...f.input,title:'Updated booking',startsAt:f.input.startsAt.replace('10:00','11:00'),endsAt:f.input.endsAt.replace('10:30','11:30')};
+  const edit=await app.inject({method:'PATCH',url:`/status-api/appointments/${row.id}`,headers:f.headers,payload:updated});expect(edit.json().ok,edit.body).toBe(true);expect(g.events.size).toBe(1);expect([...g.events.values()][0].summary).toBe('Updated booking');
+  const cancel=await app.inject({method:'POST',url:`/status-api/appointments/${row.id}/cancel`,headers:f.headers,payload:{}});expect(cancel.json().ok).toBe(true);expect(g.events.size).toBe(0);
+  expect((await db.query<any>('select status from appointment_requests where id=$1',[row.id])).rows[0].status).toBe('cancelled');
+ }finally{g.restore()}
+});
+it('blocked slots reserve time, provider uncertainty prevents duplicates, and retry reconciles exactly one event',async()=>{
+ const f=await managedFixture(),g=mockManagedGoogle();g.setFail(true);
+ try{
+  const response=await app.inject({method:'POST',url:'/status-api/appointments',headers:f.headers,payload:{...f.input,kind:'blocked',title:'Staff break'}});expect(response.json().status,response.body).toBe('uncertain');
+  const row=(await db.query<any>('select * from appointment_requests where organization_id=$1',[f.org])).rows[0];
+  expect((await app.inject({method:'POST',url:'/status-api/appointments',headers:f.headers,payload:{...f.input,requestKey:id()}})).statusCode).toBe(400);
+  g.setFail(false);expect((await app.inject({method:'POST',url:`/status-api/appointments/${row.id}/sync`,headers:f.headers,payload:{}})).json().ok).toBe(true);
+  expect([...g.events.values()][0].summary).toBe('Unavailable');expect(g.events.size).toBe(1);
+  await app.inject({method:'POST',url:`/status-api/appointments/${row.id}/sync`,headers:f.headers,payload:{}});expect(g.events.size).toBe(1);
+  const list=await app.inject({url:'/status-api/appointments',headers:{cookie:f.cookie}});expect(list.json().appointments[0].kind).toBe('blocked');
+  expect((await app.inject({url:'/status-api/schedule',headers:f.headers})).json().appointments).toHaveLength(0);
+  await db.query('update status_portal_logins set enabled=false where organization_id=$1',[f.org]);expect((await app.inject({method:'POST',url:`/status-api/appointments/${row.id}/cancel`,headers:f.headers,payload:{}})).statusCode).toBe(403);
+ }finally{g.restore()}
+});
+it('appointment endpoints reject missing CSRF, invalid dates, past times and out-of-hours bookings',async()=>{
+ const f=await managedFixture();
+ expect((await app.inject({method:'POST',url:'/status-api/appointments',headers:{cookie:f.cookie},payload:f.input})).statusCode).toBe(403);
+ for(const input of [{...f.input,startsAt:'invalid'},{...f.input,startsAt:'2020-01-01T10:00:00Z',endsAt:'2020-01-01T10:30:00Z'},{...f.input,endsAt:f.input.startsAt}])expect((await app.inject({method:'POST',url:'/status-api/appointments',headers:f.headers,payload:input})).statusCode).toBe(400);
+ await db.query("update calendar_connections set opens='12:00' where organization_id=$1",[f.org]);expect((await app.inject({method:'POST',url:'/status-api/appointments',headers:f.headers,payload:f.input})).statusCode).toBe(400);
+});
+
+it('Google conflicts fail closed and provider response loss reconciles the deterministic event without duplicate creation',async()=>{
+ const f=await managedFixture(),events=new Map<string,any>();let conflict=true,loseResponse=true,creates=0;
+ const access=vi.spyOn(calendar,'calendarAccess').mockResolvedValue('test-token');
+ const remote=vi.spyOn(calendar,'googleCalendar').mockImplementation(async(_token,path,body:any,method)=>{
+  if(path.includes('?'))return {items:conflict?[{id:'external-event',status:'confirmed'}]:[]};
+  if(body){const event={...body,id:body.id||path.split('/').at(-1)!};events.set(event.id,event);if(method!=='PATCH'){creates++;if(loseResponse){loseResponse=false;throw Error('Response lost after Google stored event')}}return event;}
+  const event=events.get(path.split('/').at(-1)!);if(!event)throw Object.assign(Error('Not found'),{status:404});return event;
+ });
+ try{
+  const first=await app.inject({method:'POST',url:'/status-api/appointments',headers:f.headers,payload:f.input});expect(first.json().status).toBe('uncertain');expect(creates).toBe(0);
+  const row=(await db.query<any>('select * from appointment_requests where organization_id=$1',[f.org])).rows[0];conflict=false;
+  expect((await app.inject({method:'POST',url:`/status-api/appointments/${row.id}/sync`,headers:f.headers,payload:{}})).json().status).toBe('uncertain');expect(creates).toBe(1);
+  expect((await app.inject({method:'POST',url:`/status-api/appointments/${row.id}/sync`,headers:f.headers,payload:{}})).json().ok).toBe(true);expect(creates).toBe(1);expect(events.size).toBe(1);
+ }finally{access.mockRestore();remote.mockRestore()}
+});
+it('browser roles cannot grant themselves premium features or read feature permissions directly',async()=>{
+ await db.exec('set role authenticated');try{await expect(db.query('select * from workspace_features')).rejects.toThrow(/permission denied/i);await expect(db.query("insert into workspace_features(organization_id,feature_key,enabled) values($1,'advanced_appointments',true)",[a])).rejects.toThrow(/permission denied/i)}finally{await db.exec('reset role')}
+});
+
+it('the portal cannot cancel a WhatsApp confirmation that is still in flight',async()=>{
+ const f=await managedFixture();
+ const row=(await db.query<any>("insert into appointment_requests(organization_id,source_event,starts_at,ends_at,timezone,calendar_id,status) values($1,$2,$3,$4,'UTC','primary','creating') returning id",[f.org,id(),f.input.startsAt,f.input.endsAt])).rows[0];
+ expect((await app.inject({method:'POST',url:`/status-api/appointments/${row.id}/cancel`,headers:f.headers,payload:{}})).statusCode).toBe(400);
+ expect((await db.query<any>('select status from appointment_requests where id=$1',[row.id])).rows[0].status).toBe('creating');
 });

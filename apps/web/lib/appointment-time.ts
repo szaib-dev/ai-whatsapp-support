@@ -1,0 +1,3 @@
+export function localInput(iso:string,zone:string){const parts=new Intl.DateTimeFormat('sv-SE',{timeZone:zone,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(iso));return parts.replace(' ','T')}
+// Convert a workspace-local wall time without assuming the browser's timezone.
+export function zonedISO(value:string,zone:string){let date=new Date(value+'Z');for(let i=0;i<3;i++){const rendered=localInput(date.toISOString(),zone);date=new Date(date.getTime()+new Date(value+'Z').getTime()-new Date(rendered+'Z').getTime())}if(localInput(date.toISOString(),zone)!==value)throw Error('This local time does not exist in your timezone. Choose another time.');return date.toISOString()}

@@ -1,3 +1,4 @@
+import {registerAppointmentManagement,featureEnabled} from './appointment-management.js';
 import {registerChatControls} from './chat-controls.js';
 import {randomBytes,scrypt as scryptCallback,timingSafeEqual,createHash} from 'node:crypto';
 import {promisify} from 'node:util';
@@ -18,6 +19,7 @@ async function portalSession(req:any){const token=req.headers.cookie?.match(/(?:
 type Tenant=(req:any,owner:boolean,fn:(db:any,org:string,actor:string)=>Promise<unknown>)=>Promise<unknown>;
 export function registerStatusPortal(app:FastifyInstance,tenant:Tenant,whatsapp?:WhatsAppManager){
  registerChatControls(app,portalSession,csrf);
+ registerAppointmentManagement(app,tenant,portalSession,csrf);
  app.get('/organizations/:org/status-access',req=>tenant(req,true,async(db,org)=>({login:(await db.query('select email,enabled,updated_at from status_portal_logins where organization_id=$1',[org])).rows[0]||null,url:(process.env.WEB_ORIGIN||'http://localhost:3000').replace(/\/$/,'')+'/status'})));
  app.put('/organizations/:org/status-access',req=>tenant(req,true,async(db,org,actor)=>{
  const input=z.object({email:z.string().trim().email().max(254).transform(v=>v.toLowerCase()),password:z.string().min(12).max(128).optional(),enabled:z.boolean()}).strict().parse(req.body);
@@ -58,7 +60,7 @@ export function registerStatusPortal(app:FastifyInstance,tenant:Tenant,whatsapp?
   return {serviceReady:!!whatsapp?.ready,accounts:rows.map(a=>{
    const status=whatsapp?.ready?whatsapp.state(session.organization_id,a.id,a.status):'service_recovering';
    const readiness=status==='connected'?(!a.ai_enabled?'ai_disabled':a.reply_only_when_away&&a.owner_availability!=='away'?(a.owner_availability==='online'?'paused_online':'choose_availability'):'ready'):status==='awaiting_scan'?'scan_qr':status==='service_recovering'?'service_recovering':a.needs_pairing?'link_required':a.desired_connected&&a.has_credentials?'recovering':'disconnected';
-   return {id:a.id,number:a.authenticated_jid?.split('@')[0]||'Clinic WhatsApp',status,readiness,qr:whatsapp?.qr(session.organization_id,a.id)||null,lastError:a.last_connection_error,automaticRecovery:a.desired_connected&&!a.needs_pairing&&a.has_credentials};
+   return {id:a.id,number:a.authenticated_jid?.split('@')[0]||'Business WhatsApp',status,readiness,qr:whatsapp?.qr(session.organization_id,a.id)||null,lastError:a.last_connection_error,automaticRecovery:a.desired_connected&&!a.needs_pairing&&a.has_credentials};
   })};
  });
  app.post('/status-api/connections/:accountId/connect',async req=>{
@@ -83,8 +85,8 @@ export function registerStatusPortal(app:FastifyInstance,tenant:Tenant,whatsapp?
  app.get('/status-api/schedule',async req=>{
   const session=await portalSession(req);
   const connection=(await pool.query('select calendar_name as "calendarName",status,timezone,booking_enabled as "bookingEnabled",weekdays,opens,closes,duration_minutes as "durationMinutes" from calendar_connections where organization_id=$1',[session.organization_id])).rows[0]||null;
-  const appointments=(await pool.query('select id,starts_at as "startsAt",ends_at as "endsAt",timezone,status from appointment_requests where organization_id=$1 order by starts_at desc limit 30',[session.organization_id])).rows;
-  return {connection,appointments};
+  const appointments=(await pool.query('select id,starts_at as "startsAt",ends_at as "endsAt",timezone,status from appointment_requests where organization_id=$1 and kind=\'appointment\' order by case when starts_at>now() then 0 else 1 end,case when starts_at>now() then starts_at end asc,starts_at desc limit 100',[session.organization_id])).rows;
+  return {connection,appointments,advancedAppointments:await featureEnabled(pool,session.organization_id)};
  });
  app.patch('/status-api/schedule',async req=>{
   csrf(req);const session=await portalSession(req),db=await pool.connect();

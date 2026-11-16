@@ -28,6 +28,7 @@ beforeAll(async () => {
   await db.exec(readFileSync("supabase/migrations/202611140012_production.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611140013_ai_provenance.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611160001_chat_privacy.sql", "utf8"));
+  await db.exec(readFileSync("supabase/migrations/202611160002_advanced_appointments.sql", "utf8"));
   await db.query("insert into auth.users values($1),($2)", [alice, bob]);
   await db.query(
     "insert into organizations(id,name) values($1,'Revive'),($2,'Zorro')",
@@ -191,6 +192,7 @@ describe("real PostgreSQL policies and constraints (PGlite)", () => {
         "knowledge_publications",
         "audit_logs",
         "processing_events",
+        "workspace_features",
       ].sort(),
     );
     expect(r.rows.every((x) => x.relrowsecurity)).toBe(true);
