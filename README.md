@@ -60,3 +60,5 @@ docker compose --env-file .env.production.example -f compose.production.yaml con
 ## Automatic deployment
 
 For the existing VPS and Cloudflare Tunnel setup, use [CICD.md](CICD.md). Images build sequentially on GitHub-hosted runners and stream over SSH, with disk checks and scoped image cleanup retaining rollback images. Its one-time setup enables main-branch deployment and service-specific updates while preserving the local Compose override and secrets. After adopting CD, use its three-file Compose command for manual app operations instead of the earlier whole-stack deploy helper.
+
+See [ATTENTION_AND_PUSH.md](ATTENTION_AND_PUSH.md) for contextual AI actions, per-conversation takeover, VIP contact controls, VAPID setup and notification validation.

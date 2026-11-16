@@ -1,3 +1,4 @@
+import {registerAttentionRoutes} from './attention-routes.js';
 import {registerAppointmentManagement,featureEnabled} from './appointment-management.js';
 import {registerChatControls} from './chat-controls.js';
 import {randomBytes,scrypt as scryptCallback,timingSafeEqual,createHash} from 'node:crypto';
@@ -18,6 +19,7 @@ function csrf(req:any){if(req.headers.origin!==(process.env.WEB_ORIGIN||'http://
 async function portalSession(req:any){const token=req.headers.cookie?.match(/(?:^|;\s*)clinic_status=([a-f\d]{64})/)?.[1];if(!token)throw new Forbidden();const row=(await pool.query('select s.organization_id,o.name from status_portal_sessions s join status_portal_logins l on l.organization_id=s.organization_id join organizations o on o.id=s.organization_id where s.token_hash=$1 and s.expires_at>now() and l.enabled',[digest(token)])).rows[0];if(!row)throw new Forbidden();return {...row,tokenHash:digest(token)}}
 type Tenant=(req:any,owner:boolean,fn:(db:any,org:string,actor:string)=>Promise<unknown>)=>Promise<unknown>;
 export function registerStatusPortal(app:FastifyInstance,tenant:Tenant,whatsapp?:WhatsAppManager){
+ registerAttentionRoutes(app,tenant,portalSession,csrf);
  registerChatControls(app,portalSession,csrf);
  registerAppointmentManagement(app,tenant,portalSession,csrf);
  app.get('/organizations/:org/status-access',req=>tenant(req,true,async(db,org)=>({login:(await db.query('select email,enabled,updated_at from status_portal_logins where organization_id=$1',[org])).rows[0]||null,url:(process.env.WEB_ORIGIN||'http://localhost:3000').replace(/\/$/,'')+'/status'})));

@@ -14,7 +14,7 @@ guard.listen(3102,'127.0.0.1',()=>{
 let child,timer,stopping=false,failures=0,startedAt=0;
 function start(){
  if(stopping)return;startedAt=Date.now();
- child=spawn(process.execPath,['--import','tsx','apps/api/src/server.ts'],{cwd:root,stdio:'inherit',windowsHide:true});
+ child=spawn(process.execPath,['--import','dotenv/config','--import','tsx','apps/api/src/server.ts'],{cwd:root,stdio:'inherit',windowsHide:true});
  child.once('error',error=>{console.error('API launch failed:',error.code)});
  child.once('exit',(code,signal)=>{
   if(stopping)return;

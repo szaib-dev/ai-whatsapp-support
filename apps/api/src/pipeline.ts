@@ -10,6 +10,7 @@ import {
 export interface Incoming {
   id: string;
   text: string;
+  name?: string;
   jid: string;
   fromMe?: boolean;
   isGroup?: boolean;
@@ -32,7 +33,7 @@ export interface Store {
     event: Incoming,
     answer: string | null,
     send: () => Promise<string>,
-    options?:{handoff?:boolean;calendar?:boolean},
+    options?:{handoff?:boolean;calendar?:boolean;notify?:boolean;reason?:string;category?:string},
   ): Promise<void>;
   security(session: string): Promise<void>;
 }
@@ -102,26 +103,44 @@ export class MessagePipeline {
         validateContext(c, session);
         if (!(await this.store.claim(c, event))) return;
         let answer: string | null = null;
-        let handoff=false,calendar=false;
+        let handoff=false,calendar=false,notify=false,reason="",category="handover";
         if (
           c.conversation.mode === "active" &&
           !c.contact.ai_opt_out &&
           c.revision.content.aiEnabled
         ) {
           try {
-            answer = explicitHandoff(event.text)?null:await this.appointments?.reply(c,event.text,event.id) ?? null;
-            calendar=answer!==null;
-            if(answer===null){const decision=await automaticResponse(c,event.text,this.ai);answer=decision.reply;handoff=decision.handoff;}
+            const behavior=c.contact.assistant_behavior||'normal';
+            if(behavior==='ignore') { /* Intentional silence: no model or calendar access. */ }
+            else if(behavior==='human'){handoff=true;notify=true;reason='Contact requires human assistance';}
+            else {
+            const contextual=!!this.ai.decide&&!/^(?:confirm|cancel)\b/i.test(event.text.trim());
+            if(!contextual){answer=explicitHandoff(event.text)?null:await this.appointments?.reply(c,event.text,event.id)??null;calendar=answer!==null;}
+            if(answer===null){
+              const decision=await automaticResponse(c,event.text,this.ai);
+              answer=decision.reply||null;handoff=decision.handoff;
+              notify=!!decision.actions?.includes('NOTIFY_OWNER')||handoff;
+              reason=decision.reason||'';category=decision.category||'handover';
+              if(contextual&&!handoff&&(!decision.actions||decision.actions.includes('REPLY'))){
+                const booking=await this.appointments?.reply(c,event.text,event.id)??null;
+                if(booking!==null){answer=booking;calendar=true;}
+              }
+            }
+            if(behavior==='notify'){notify=true;reason=reason||'Priority contact sent a message';category='owner';}
+            }
           } catch {
             answer = null;
           }
+        }
+        if(c.conversation.mode==='human'&&!c.contact.ai_opt_out&&c.contact.assistant_behavior!=='ignore'){
+          notify=true;reason='New message in a conversation awaiting your team';
         }
         finalized = true;
         await this.store.finalize(c, event, answer, async () => {
           if (this.sockets.get(session) !== socket)
             throw new TenantMismatch("Socket changed");
           return socket.transport.send(c.contact.identity, answer!);
-        },{handoff,calendar});
+        },{handoff,calendar,notify,reason,category});
       };
       await this.store.guard(current,event,work);
     } catch (error) {

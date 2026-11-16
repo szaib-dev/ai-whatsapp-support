@@ -1,4 +1,6 @@
 import "dotenv/config";
+import {PushWorker} from './notifications.js';
+import {setConversationMode} from './attention-routes.js';
 import {validateEnvironment} from "./config.js";
 import {registerStatusPortal} from "./status-portal.js";
 import {registerCalendarRoutes} from "./calendar-routes.js";
@@ -14,7 +16,7 @@ import { WhatsAppManager } from "./whatsapp.js";
 import { MESSAGE_POLICY } from "./dispatcher.js";
 const uuid = z.string().uuid();
 class Unavailable extends Error {}
-export async function buildServer(whatsapp?: WhatsAppManager) {
+export async function buildServer(whatsapp?: WhatsAppManager,options:{pushWorker?:boolean}={}) {
   const app = Fastify({
     bodyLimit: 400 * 1024,
     trustProxy:process.env.NODE_ENV==='production'?(_address:string,hop:number)=>hop<1:false,
@@ -46,7 +48,7 @@ export async function buildServer(whatsapp?: WhatsAppManager) {
           : 500;
     if (status === 500)
       app.log.error(
-        { err: { name: error instanceof Error ? error.name : "Unknown" } },
+        { err: { name: error instanceof Error ? error.name : "Unknown",code:(error as any)?.code||"UNKNOWN" } },
         "Request failed",
       );
     reply
@@ -108,8 +110,15 @@ export async function buildServer(whatsapp?: WhatsAppManager) {
     }
   }
   async function administrator(req:any){const actor=await user(req);const member=(await pool.query('select 1 from organization_members where user_id=$1 limit 1',[actor])).rows.length;const bootstrap=(process.env.ADMIN_USER_IDS||'').split(',').map(v=>v.trim()).includes(actor);if(!member&&!bootstrap)throw new Forbidden();return actor;}
+  app.delete('/push-device',async req=>{
+    const actor=await user(req),{endpoint}=z.object({endpoint:z.string().max(2048)}).strict().parse(req.body);
+    await pool.query('delete from push_subscriptions where principal=$1 and endpoint=$2',['admin:'+actor,endpoint]);return {ok:true};
+  });
   app.get('/admin/session',async req=>{await administrator(req);return {authorized:true};});
-  app.get('/ready',async(_req,reply)=>{try{await pool.query('select 1');if(process.env.SESSION_ENCRYPTION_KEY&&!whatsapp?.ready)return reply.code(503).send({status:'recovering'});return {status:'ready'};}catch{return reply.code(503).send({status:'unavailable'});}});
+  app.get('/ready',async(_req,reply)=>{try{await pool.query('select 1');if(process.env.SESSION_ENCRYPTION_KEY&&!whatsapp?.ready)return reply.code(503).send({status:'recovering'});return {status:'ready'};}catch(error){app.log.warn({code:(error as any)?.code||'UNKNOWN'},'Readiness database probe failed');return reply.code(503).send({status:'unavailable'});}});
+  const pushWorker=new PushWorker();
+  app.addHook('onReady',async()=>{if(options.pushWorker!==false)pushWorker.start()});
+  app.addHook('preClose',async()=>{await pushWorker.close()});
   registerStatusPortal(app,tenant,whatsapp);
   registerCalendarRoutes(app,tenant);
   const streams=new Set<any>();
@@ -405,11 +414,7 @@ export async function buildServer(whatsapp?: WhatsAppManager) {
           .object({ mode: z.enum(["active", "human", "paused"]) })
           .strict()
           .parse(req.body);
-      const r = await db.query(
-        "update conversations set mode=$3 where organization_id=$1 and id=$2 returning id",
-        [org, id, mode],
-      );
-      if (!r.rowCount) throw new Forbidden();
+      await setConversationMode(db,org,id,mode);
       await db.query(
         "insert into audit_logs(organization_id,actor_id,event,resource_id) values($1,$2,$3,$4)",
         [org, actor, `conversation_${mode}`, id],

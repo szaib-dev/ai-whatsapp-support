@@ -1,0 +1,31 @@
+# Contextual responses, human handover and Web Push
+
+The existing inbox, privacy gates, tenant checks and delivery locks remain the message-processing boundary. The AI now returns validated `REPLY`, `IGNORE`, `NOTIFY_OWNER` and `HANDOVER` actions, with combined actions supported. Silence is a valid result and does not trigger a replacement reply. General messages are assessed before appointment processing; private `CONFIRM` / `CANCEL` controls stay on the existing backend booking path. Model failures request owner review without sending a generic customer reply. Language, sarcasm and slang interpretation comes from bounded conversational context and the model, rather than a new keyword classifier.
+
+Contact policies are stored per workspace/contact. Ignore bypasses model and appointment processing. Human-required contacts remain paused until their policy is changed and a conversation is resumed. Notify contacts generate attention even when the model chooses silence. Custom instructions are subordinate to safety and privacy controls. Existing AI opt-out, published AI enablement, account availability, stopped-chat controls and booking permission checks still apply. Resuming never overrides those controls.
+
+## Persistent takeover
+
+The existing conversation mode is reused. A version invalidates a generation when takeover/resume or contact rules change, so a result generated before takeover cannot be sent after resume. Pending queue entries are cancelled; resuming processes new messages. Owner WhatsApp messages are recorded as staff history, excluded from external AI context, and pause only that conversation. Owner event IDs and resume timestamps prevent replay from undoing a later resume. Generated outbound IDs are persisted before network sends and checked against the account, recipient and workspace, including after restarts. A send already in progress on WhatsApp cannot be recalled.
+
+## Browser notifications
+
+Run `node scripts/setup-push.mjs .env` locally, or pass the path to the deployment's secret environment file. Keep `VAPID_PRIVATE_KEY` private and preserve the key pair across deployments. `VAPID_SUBJECT` must be a contact HTTPS URL or `mailto:` address. The local environment has generated keys; they are not checked into Git. The production API loads its own `.env.production`, so it needs its own persistent keys. Apply `npm run db:migrate` before starting the new API.
+
+In the administrator dashboard or `/status`, open **Attention → Notifications**, enable the current device, then send a test notification. Browser permission is requested only after clicking Enable. Settings control alert categories and lock-screen previews. Previews hide sender/message/reason by default. No customer page is cached by the service worker. Push uses encrypted VAPID Web Push through browser vendors; no paid notification vendor is required.
+
+Subscriptions belong to verified workspace owners or a specific client portal session. Every delivery rechecks membership/session authorization, category preferences and stopped-chat privacy. Expired/reset/logged-out portal sessions cannot receive new alerts. Administrator sign-out removes the current browser subscription. One endpoint belongs to one recipient/workspace at a time. Transferring an endpoint clears its old deliveries. Push URLs are restricted to known vendor HTTPS hosts; arbitrary endpoints cannot become server-side fetch requests.
+
+Attention events and push deliveries are durable, deduplicated, retried with backoff, and serialized across API workers. HTTP 404/410 removes an expired endpoint. Delivery failures are visible in the notification settings counts. The service worker deduplicates event IDs for seven days and uses notification tags, limiting duplicates after an ambiguous server crash. Pending alerts older than 24 hours and reviewed alerts are skipped. Calendar status transitions generate appointment alerts without sending Calendar data to the AI provider. Attention/delivery history is retained until operator deletion, as disclosed in the Privacy Policy.
+
+HTTPS is required outside localhost. Background delivery depends on device, browser and OS support, network and permission settings. On iOS/iPadOS, install to the Home Screen and enable notifications from the installed app. See [MDN Push API](https://developer.mozilla.org/en-US/docs/Web/API/Push_API), [WebKit support requirements](https://webkit.org/blog/13878/web-push-for-web-apps-on-ios-and-ipados/) and the [Web Push library](https://github.com/web-push-libs/web-push).
+
+## Validation
+
+The automated suite covers persisted silent handovers, generation cancellation across pause/resume, owner message history/replay, durable generated IDs, VIP ignore, tenant isolation, push deduplication, recipient preference/revocation checks, retry and expired-endpoint handling. A cryptographic round trip verifies VAPID signing, payload encryption and decryption only by the subscribing device key. Existing booking, privacy, connection and authorization tests remain in the suite.
+
+`node scripts/evaluate-actions.mjs` is an optional live-provider smoke test using only synthetic conversations. It requires `npm run build:api` and the configured provider key. All twelve English/Roman Urdu/Urdu/Punjabi examples passed during implementation, including misspellings and a sarcastic complaint. Model output remains probabilistic; the smoke test does not establish universal language understanding.
+
+Browser interaction review used the actual shared attention component with an isolated fixture, at desktop, 390 px and 360 px widths. Reviewed conversation opening, takeover/resume, contact policy saves, and notification preference saves; no horizontal page overflow was observed. The fixture is removed from the release. OS-level receipt with the dashboard closed has not been verified on a permission-granted physical device; the Enable/Test controls support that final device check.
+
+Final release checks: 228 tests passed, one skipped; TypeScript, ESLint, production build, diff whitespace checks and the production dependency audit passed. The local production configuration checker still reports the pre-existing operator/contact, HTTPS origin and legal/provider-review requirements; those checks were not bypassed.

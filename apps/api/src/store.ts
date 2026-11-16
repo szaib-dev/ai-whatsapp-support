@@ -92,7 +92,7 @@ export class PgStore implements Store {
       ).rowCount === 1
     );
   }
-  async finalize(c:Context,e:Incoming,answer:string|null,send:()=>Promise<string>,options:{handoff?:boolean;calendar?:boolean}={}){
+  async finalize(c:Context,e:Incoming,answer:string|null,send:()=>Promise<string>,options:{handoff?:boolean;calendar?:boolean;notify?:boolean;reason?:string;category?:string}={}){
     return withChatPrivacy(c.organization_id,c.account.id,e.jid,()=>this.finalizeAllowed(c,e,answer,send,options));
   }
   private async finalizeAllowed(
@@ -100,7 +100,7 @@ export class PgStore implements Store {
     e: Incoming,
     answer: string | null,
     send: () => Promise<string>,
-    options:{handoff?:boolean;calendar?:boolean}={},
+    options:{handoff?:boolean;calendar?:boolean;notify?:boolean;reason?:string;category?:string}={},
   ) {
     const db = await pool.connect();
     let attempted = false;
@@ -145,46 +145,39 @@ export class PgStore implements Store {
       const handled=(await db.query('select 1 from whatsapp_inbox where organization_id=$1 and account_id=$2 and external_id=any($3::text[]) and owner_handled_at is not null limit 1',[c.organization_id,c.account.id,(e.parts||[e]).map(p=>p.id)])).rows[0];
       if(handled || (policy?.reply_only_when_away && account.owner_availability!=='away'))throw new OwnerDeferred('Owner is active, status unknown, or messages were handled');
       const newer=(await db.query("select 1 from whatsapp_inbox where organization_id=$1 and account_id=$2 and customer_jid=$3 and state='pending' limit 1",[c.organization_id,c.account.id,c.contact.identity])).rows.length>0;
-      if (
-        newer ||
-        !answer ||
-        conversation.mode !== "active" ||
-        contact.ai_opt_out ||
-        (pub?.revision_id || DEFAULT_REVISION_ID) !== c.revision.id
-      ) {
-        await db.query(
-          "update processing_events set state='escalated' where organization_id=$1 and conversation_id=$2 and external_id=$3",
-          [c.organization_id, c.conversation.id, e.id],
-        );
-      } else {
-        attempted = true;
-        const id = await send();
-        await db.query(
-          "insert into messages(organization_id,conversation_id,external_id,sender,content,status,ai_context_source) values($1,$2,$3,'ai',$4,'sent',$5)",
-          [c.organization_id, c.conversation.id, id, answer,options.calendar?'calendar':'assistant'],
-        );
-        if(options.handoff){
-          await db.query("update conversations set mode='human' where organization_id=$1 and id=$2",[c.organization_id,c.conversation.id]);
+      const eligible=!newer && !contact.ai_opt_out && contact.assistant_behavior!=='ignore'
+        && conversation.assistant_version===(c.conversation.assistant_version??0)
+        && (pub?.revision_id || DEFAULT_REVISION_ID)===c.revision.id;
+      // Pause and enqueue attention independently of whether an acknowledgement is sent.
+      if(eligible&&(options.handoff||options.notify)){
+        if(options.handoff&&conversation.mode==='active'){
+          await db.query("update conversations set mode='human',handoff_reason=$3 where organization_id=$1 and id=$2",[c.organization_id,c.conversation.id,options.reason||'Customer requested staff']);
+          await db.query("update whatsapp_inbox set owner_handled_at=now(),state=case when state='pending' then 'done' else state end where organization_id=$1 and account_id=$2 and customer_jid=$3 and state in ('pending','processing')",[c.organization_id,c.account.id,c.contact.identity]);
           await db.query("insert into audit_logs(organization_id,event,resource_id) values($1,'ai_staff_handoff',$2)",[c.organization_id,c.conversation.id]);
-          await db.query(`insert into handoff_unread_requests(organization_id,conversation_id,account_id,customer_jid,message_id,message_at)
-            select m.organization_id,m.conversation_id,$3,$4,m.external_id,coalesce(i.message_at,m.created_at)
-            from messages m left join whatsapp_inbox i on i.organization_id=m.organization_id and i.account_id=$3 and i.external_id=m.external_id
-            where m.organization_id=$1 and m.conversation_id=$2 and m.sender='customer' and m.external_id=any($5::text[])
-            order by coalesce(i.message_at,m.created_at) desc,m.id desc limit 1
-            on conflict(conversation_id) do update set message_id=excluded.message_id,message_at=excluded.message_at,created_at=now()`,[c.organization_id,c.conversation.id,c.account.id,c.contact.identity,(e.parts||[e]).map(p=>p.id)]);
-
         }
-        await db.query(
-          "update processing_events set state='sent' where organization_id=$1 and conversation_id=$2 and external_id=$3",
-          [c.organization_id, c.conversation.id, e.id],
-        );
+        await db.query('select queue_attention($1,$2,$3,$4,$5,$6,$7)',[c.organization_id,c.conversation.id,options.category||'handover',options.reason||'Conversation needs your attention',e.text.slice(0,240),contact.display_name||contact.identity,'message:'+e.id]);
       }
+      if(eligible&&answer&&conversation.mode==='active'){
+        attempted=true;
+        const id=await send();
+        await db.query("insert into messages(organization_id,conversation_id,external_id,sender,content,status,ai_context_source) values($1,$2,$3,'ai',$4,'sent',$5)",[c.organization_id,c.conversation.id,id,answer,options.calendar?'calendar':'assistant']);
+        if(options.handoff)await db.query(`insert into handoff_unread_requests(organization_id,conversation_id,account_id,customer_jid,message_id,message_at)
+          select m.organization_id,m.conversation_id,$3,$4,m.external_id,m.created_at from messages m
+          where m.organization_id=$1 and m.conversation_id=$2 and m.sender='customer' and m.external_id=any($5::text[])
+          order by m.created_at desc limit 1 on conflict(conversation_id) do update set message_id=excluded.message_id,message_at=excluded.message_at,created_at=now()`,[c.organization_id,c.conversation.id,c.account.id,c.contact.identity,(e.parts||[e]).map(p=>p.id)]);
+      }
+      await db.query("update processing_events set state=$4 where organization_id=$1 and conversation_id=$2 and external_id=$3",[c.organization_id,c.conversation.id,e.id,attempted?'sent':'escalated']);
       await db.query("commit");
     } catch (error) {
       await db.query("rollback");
       if(error instanceof OwnerDeferred && !attempted)await db.query("delete from processing_events where organization_id=$1 and conversation_id=$2 and external_id=$3 and state='processing'",[c.organization_id,c.conversation.id,e.id]);
       // Never automatically retry an ambiguous external send.
-      if(attempted&&options.handoff)await pool.query("update conversations set mode='human' where organization_id=$1 and id=$2 and mode='active'",[c.organization_id,c.conversation.id]);
+      if(attempted&&(options.handoff||options.notify)){
+        // An uncertain acknowledgement must not roll back the owner's alert or pause.
+        // A later manual resume still wins over this failed generation.
+        if(options.handoff)await pool.query("update conversations set mode='human',handoff_reason=$3 where organization_id=$1 and id=$2 and mode='active' and assistant_version=$4",[c.organization_id,c.conversation.id,options.reason||'Customer requested staff',c.conversation.assistant_version??0]);
+        await pool.query('select queue_attention($1,$2,$3,$4,$5,$6,$7)',[c.organization_id,c.conversation.id,options.category||'handover',options.reason||'Conversation needs attention',e.text.slice(0,240),c.contact.identity,'message:'+e.id]);
+      }
       if (attempted)
         await pool.query(
           "update processing_events set state='uncertain' where organization_id=$1 and conversation_id=$2 and external_id=$3",

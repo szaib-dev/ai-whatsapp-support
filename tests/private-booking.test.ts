@@ -16,7 +16,7 @@ it('current forwarded calendar output and correction prompts cannot reintroduce 
 });
 it('actual DeepSeek respond/select/basic requests share the privacy boundary',async()=>{
  const previous=process.env.DEEPSEEK_API_KEY;process.env.DEEPSEEK_API_KEY='synthetic-test-key';const bodies:string[]=[];
- vi.stubGlobal('fetch',vi.fn(async(_url:any,options:any)=>{bodies.push(options.body);const system=JSON.parse(options.body).messages[0].content;const content=system.startsWith('You select')?'{"factId":null}':system.startsWith('Classify')?'{"intent":"other"}':'{"reply":"We open at 9am.","handoff":false}';return {ok:true,json:async()=>({choices:[{message:{content}}]})};}));
+ vi.stubGlobal('fetch',vi.fn(async(_url:any,options:any)=>{bodies.push(options.body);const system=JSON.parse(options.body).messages[0].content;const content=system.startsWith('You select')?'{"factId":null}':system.startsWith('Classify')?'{"intent":"other"}':'{"reply":"We open at 9am.","actions":["REPLY"]}';return {ok:true,json:async()=>({choices:[{message:{content}}]})};}));
  try{const ai=new DeepSeek();await ai.respond(context(),'Where are you?');await ai.select(context(),'Hours?');await ai.basic(context(),'Tell me something else');expect(bodies).toHaveLength(3);for(const body of bodies){expect(body).not.toContain(secret);expect(body).not.toContain('LEGACY_PRIVATE_HISTORY');expect(body).not.toContain('ABC123');}}finally{if(previous===undefined)delete process.env.DEEPSEEK_API_KEY;else process.env.DEEPSEEK_API_KEY=previous;}
 });
 it.each(['English','Roman Urdu','Urdu'])('routine booking replies are localized, short and deterministic: %s',language=>{
@@ -35,7 +35,7 @@ it.each(['forwarded','quoted','line-quoted','line-fragment','short-result','lega
  const current='Please clarify this note: '+quoted+' CONFIRM ABC123 or CANCEL FED456';
  const bodies:string[]=[];vi.stubGlobal('fetch',vi.fn(async(_url:any,options:any)=>{
   bodies.push(options.body);const system=JSON.parse(options.body).messages[0].content;
-  return {ok:true,json:async()=>({choices:[{message:{content:system.startsWith('You select')?'{"factId":null}':system.startsWith('Classify')?'{"intent":"other"}':'{"reply":"Please ask our team.","handoff":false}'}}]})};
+  return {ok:true,json:async()=>({choices:[{message:{content:system.startsWith('You select')?'{"factId":null}':system.startsWith('Classify')?'{"intent":"other"}':'{"reply":"Please ask our team.","actions":["REPLY"]}'}}]})};
  }));
  try{
   const ai=new DeepSeek();await ai.respond(c,current);await ai.select(c,current);await ai.basic(c,current);await ai.decide(c,current,quoted+' CONFIRM ABC123');

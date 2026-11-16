@@ -47,7 +47,7 @@ it('current topic, customer memory and clinic-specific rules all reach generatio
  const p=conversationPrompt(c,'Where is the clinic?');expect(p[0].content).toContain(c.revision.content.instructions);const data=JSON.parse(p[1].content);expect(data.currentMessageChunks).toBe('Where is the clinic?');expect(data.customerMemory).toContain('Customer name is Ali');expect(data.recentMessages).toHaveLength(2);
 });
 it.each([['Please let me speak to a human','English'],['Mujhe staff se baat karni hai','Roman Urdu'],['عملے سے بات کرنی ہے','Urdu']])('staff requests receive a final localized handoff notice: %s',async(text,language)=>{
- const decide=vi.fn();const result=await automaticResponse(context(history),text,{select:vi.fn(),decide});expect(result.handoff).toBe(true);expect(replyLanguage(context(),text)).toBe(language);expect(decide).not.toHaveBeenCalled();expect(result.reply).not.toContain('—');
+ const decide=vi.fn();const result=await automaticResponse(context(history),text,{select:vi.fn(),decide});expect(result.handoff).toBe(true);expect(replyLanguage(context(),text)).toBe(language);expect(decide).toHaveBeenCalledTimes(1);expect(result.reply).not.toContain('—');
 });
 it('owner-requested handoffs use the same server-controlled notice',async()=>{
  const result=await automaticResponse(context(),'I need help with this complaint',{select:vi.fn(),decide:vi.fn(async()=>({reply:'I transferred you instantly!',handoff:true}))});expect(result).toEqual({reply:'Our team will handle this chat from here and reply when available.',handoff:true});

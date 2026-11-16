@@ -1,3 +1,4 @@
+import {reserveOutbound,isGeneratedMessage,recordOwnerMessage} from './owner-handover.js';
 import {privacyGate,withChatPrivacy,isChatStopped,phoneFromJid,rememberPhone,assertPrivacyLease} from './chat-privacy.js';
 import {ownerHandled,messageTime} from "./owner-availability.js";
 import {AppointmentAssistant} from "./appointments.js";
@@ -158,7 +159,8 @@ export class WhatsAppManager {
         await this.pipeline.bind(l.session, jid, { send: async (target, text) => {
           if (l.stopped || l.socket !== socket) throw new Error("Stale connection");
           const id = generateMessageIDV2(socket.user?.id);
-          this.generatedIds.add(id);if(this.generatedIds.size>2000)this.generatedIds.delete(this.generatedIds.values().next().value!);
+          this.generatedIds.add(`${l.org}/${l.account}/${id}`);if(this.generatedIds.size>2000)this.generatedIds.delete(this.generatedIds.values().next().value!);
+          await reserveOutbound(l.org,l.account,target,id);
           const sent = await withChatPrivacy(l.org,l.account,target,()=>socket.sendMessage(target, { text }, { messageId: id }));
           if (!sent?.key.id) throw new Error("Uncertain send");
           this.repliedAt.set(`${l.session}/${target}`,Date.now());
@@ -200,16 +202,22 @@ export class WhatsAppManager {
           assertPrivacyLease();
           if(message.key.fromMe){
             const time=messageTime(message.messageTimestamp);
-            if(!this.generatedIds.has(message.key.id!)&&message.messageTimestamp){
-              const ours=(await pool.query("select 1 from messages m join conversations c on c.organization_id=m.organization_id and c.id=m.conversation_id where m.organization_id=$1 and c.account_id=$2 and m.external_id=$3 and m.sender in ('ai','staff') limit 1",[l.org,l.account,message.key.id])).rows.length>0;
-              if(!ours)await ownerHandled(l.org,l.account,jid,time);
+            if(!this.generatedIds.has(`${l.org}/${l.account}/${message.key.id}`)&&message.messageTimestamp){
+              const ours=await isGeneratedMessage(l.org,l.account,jid,message.key.id!);
+              if(!ours){
+                const content=normalizeMessageContent(message.message);
+                const text=content?.conversation||content?.extendedTextMessage?.text||'[WhatsApp attachment]';
+                // Only live outgoing events may pause. Replay is recorded/deduplicated separately.
+                if(event.type==='notify')await recordOwnerMessage(l.org,l.account,jid,message.key.id!,time,text);
+                await ownerHandled(l.org,l.account,jid,time);
+              }
             }
             return;
           }
           if(event.type!=='notify')return;
           const content=normalizeMessageContent(message.message);
           const text=content?.conversation||content?.extendedTextMessage?.text||content?.imageMessage?.caption||content?.videoMessage?.caption||(content?.audioMessage||content?.imageMessage||content?.videoMessage||content?.documentMessage||content?.stickerMessage?'[The customer sent an attachment. Ask them to describe what they need in text.]':'');
-          if(text){this.customerActivity(l,socket,message);await this.inbox.save(l.session,{id:message.key.id!,jid,text,timestamp:messageTime(message.messageTimestamp).getTime()});}
+          if(text){this.customerActivity(l,socket,message);await this.inbox.save(l.session,{id:message.key.id!,jid,text,name:message.pushName?.slice(0,120),timestamp:messageTime(message.messageTimestamp).getTime()});}
         });
       }
     }, false);
@@ -264,7 +272,8 @@ export class WhatsAppManager {
   async sendStaff(org: string, account: string, jid: string, text: string, messageId: string) {
     const live = this.live.get(account);
     if (!live || live.org !== org || live.stopped || !live.socket) throw new Error("WhatsApp is disconnected");
-    this.generatedIds.add(messageId);
+    this.generatedIds.add(`${org}/${account}/${messageId}`);
+    await reserveOutbound(org,account,jid,messageId);
     const sent = await withChatPrivacy(org,account,jid,()=>live.socket!.sendMessage(jid, { text }, { messageId }));
     if (!sent?.key.id) throw new Error("Delivery uncertain");
     return sent.key.id;

@@ -89,6 +89,7 @@ beforeAll(async () => {
   await db.exec(readFileSync("supabase/migrations/202611140013_ai_provenance.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611160001_chat_privacy.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611160002_advanced_appointments.sql", "utf8"));
+  await db.exec(readFileSync("supabase/migrations/202611160003_attention_push.sql", "utf8"));
   await db.query("insert into auth.users values($1),($2)", [alice, bob]);
   await db.query(
     "insert into organizations(id,name) values($1,'Revive'),($2,'Zorro')",
@@ -98,7 +99,7 @@ beforeAll(async () => {
     "insert into organization_members values($1,$2,'owner'),($3,$4,'staff')",
     [a, alice, b, bob],
   );
-  app = await buildServer();
+  app = await buildServer(undefined,{pushWorker:false});
 }, 30000);
 afterAll(async () => {
   await app.close();
@@ -371,7 +372,7 @@ it('updates live timing and rejects invalid timing',async()=>{
  expect((await app.inject({method:'PATCH',url:`/organizations/${a}/reply-settings`,headers:{authorization:'Bearer valid'},payload:{delayMs:10000,maxWaitMs:1000}})).statusCode).toBe(400);
 });
 it('staff sending is idempotent, takes over the conversation and preserves actual outcome',async()=>{
- state.user=alice;const sendStaff=vi.fn(async()=> 'provider-id');const manager={ready:true,sendStaff,close:async()=>{}};const server=await buildServer(manager as any);
+ state.user=alice;const sendStaff=vi.fn(async()=> 'provider-id');const manager={ready:true,sendStaff,close:async()=>{}};const server=await buildServer(manager as any,{pushWorker:false});
  const account=(await db.query<any>("insert into whatsapp_accounts(organization_id,authenticated_jid,status) values($1,$2,'connected') returning *",[a,id()+'@s.whatsapp.net'])).rows[0];
  const c=(await new PgStore().load(await new PgStore().resolve(account.session_id),{id:id(),jid:id()+'@lid',text:'hi'}))!;
  const payload={text:'Hello from your team',requestId:id()};const options={method:'POST' as const,url:`/organizations/${a}/conversations/${c.conversation.id}/send`,headers:{authorization:'Bearer valid'},payload};
@@ -379,7 +380,7 @@ it('staff sending is idempotent, takes over the conversation and preserves actua
  expect((await db.query<any>('select mode from conversations where id=$1',[c.conversation.id])).rows[0].mode).toBe('human');await server.close();
 });
 it('removes an account through the owner endpoint while retaining its conversation history',async()=>{
- state.user=alice;const unlink=vi.fn(async()=>{});const server=await buildServer({ready:true,unlink,close:async()=>{}} as any);
+ state.user=alice;const unlink=vi.fn(async()=>{});const server=await buildServer({ready:true,unlink,close:async()=>{}} as any,{pushWorker:false});
  const account=(await db.query<any>('insert into whatsapp_accounts(organization_id) values($1) returning id',[a])).rows[0];
  const result=await server.inject({method:'POST',url:`/organizations/${a}/whatsapp/${account.id}/remove`,headers:{authorization:'Bearer valid'}});expect(result.statusCode).toBe(200);expect(unlink).toHaveBeenCalledWith(a,account.id);
  expect((await db.query<any>('select removed_at from whatsapp_accounts where id=$1',[account.id])).rows[0].removed_at).toBeTruthy();await server.close();
@@ -540,7 +541,7 @@ it('clinic connection recovery is scoped to its own numbers and never restarts a
  const foreign=(await db.query<any>("insert into whatsapp_accounts(organization_id,status) values($1,'connected') returning id",[other])).rows[0];
  await db.query('insert into status_portal_logins(organization_id,email,password_hash,enabled) values($1,$2,$3,true)',[org,'recovery@example.com',await hashStatusPassword('Recovery password 123')]);
  const ensureConnected=vi.fn(async()=>{}),stop=vi.fn(),manager={ready:true,state:vi.fn((_org:string,_account:string,stored:string)=>stored),qr:vi.fn((o:string)=>o===org?'scoped-qr':null),ensureConnected,stop,close:async()=>{}};
- const server=await buildServer(manager as any);
+ const server=await buildServer(manager as any,{pushWorker:false});
  try{
  const login=await server.inject({method:'POST',url:'/status-api/login',headers:clinicHeaders,payload:{email:'recovery@example.com',password:'Recovery password 123'}});expect(login.statusCode).toBe(200);const cookie=String(login.headers['set-cookie']).split(';')[0];
  const result=await server.inject({url:'/status-api/connections',headers:{cookie}});expect(result.statusCode).toBe(200);expect(result.json().accounts).toHaveLength(1);expect(result.json().accounts[0]).toMatchObject({id:account.id,readiness:'paused_online',qr:'scoped-qr'});expect(result.body).not.toContain(foreign.id);expect(result.body).not.toContain('session_id');
@@ -822,4 +823,81 @@ it('the portal cannot cancel a WhatsApp confirmation that is still in flight',as
  const row=(await db.query<any>("insert into appointment_requests(organization_id,source_event,starts_at,ends_at,timezone,calendar_id,status) values($1,$2,$3,$4,'UTC','primary','creating') returning id",[f.org,id(),f.input.startsAt,f.input.endsAt])).rows[0];
  expect((await app.inject({method:'POST',url:`/status-api/appointments/${row.id}/cancel`,headers:f.headers,payload:{}})).statusCode).toBe(400);
  expect((await db.query<any>('select status from appointment_requests where id=$1',[row.id])).rows[0].status).toBe('creating');
+});
+
+// Conversation intelligence, persistent takeover and private Web Push integration.
+it('silent handover persists and notifies once without requiring a WhatsApp send',async()=>{
+ const acct=(await db.query<any>("insert into whatsapp_accounts(organization_id,authenticated_jid,status,owner_availability) values($1,$2,'connected','away') returning *",[a,id()+'@s.whatsapp.net'])).rows[0];
+ const send=vi.fn(async()=>id()),decide=vi.fn(async()=>({reply:'',handoff:true,actions:['IGNORE','HANDOVER','NOTIFY_OWNER'] as any,reason:'Speak to Shahzaib',category:'owner' as const}));
+ const pipe=new MessagePipeline(new PgStore(),{select:vi.fn(),decide});await pipe.bind(acct.session_id,acct.authenticated_jid,{send});
+ const event={id:id(),jid:id()+'@lid',text:'Shahzaib ko online bulao'};await pipe.receive(acct.session_id,event);await pipe.receive(acct.session_id,event);
+ const c=(await db.query<any>('select c.* from conversations c join contacts t on t.organization_id=c.organization_id and t.id=c.contact_id where c.account_id=$1 and t.identity=$2',[acct.id,event.jid])).rows[0];
+ expect(c.mode).toBe('human');expect(send).not.toHaveBeenCalled();expect(decide).toHaveBeenCalledTimes(1);
+ expect((await db.query('select * from attention_events where organization_id=$1 and conversation_id=$2',[a,c.id])).rows).toHaveLength(1);
+});
+it('owner WhatsApp sends cancel in-flight replies, persist history, and replay cannot undo resume',async()=>{
+ const {recordOwnerMessage,reserveOutbound,isGeneratedMessage}=await import('../apps/api/src/owner-handover.js');
+ const acct=(await db.query<any>("insert into whatsapp_accounts(organization_id,authenticated_jid,status,owner_availability) values($1,$2,'connected','away') returning *",[a,id()+'@s.whatsapp.net'])).rows[0];
+ const store=new PgStore(),jid=id()+'@lid',e={id:id(),jid,text:'Hi, are you available?'};const c=(await store.load(await store.resolve(acct.session_id),e))!;await store.claim(c,e);
+ const manualId=id(),time=new Date(Date.now()-1000);await recordOwnerMessage(a,acct.id,jid,manualId,time,'I will handle this.');
+ expect((await db.query<any>('select mode from conversations where id=$1',[c.conversation.id])).rows[0].mode).toBe('human');
+ const send=vi.fn(async()=>id());await store.finalize(c,e,'Old pending response',send);expect(send).not.toHaveBeenCalled();
+ const {setConversationMode}=await import('../apps/api/src/attention-routes.js');const adapter={query:async(...args:any[])=>{const r=await (db.query as any)(...args);return {...r,rowCount:r.affectedRows??r.rows.length}}};
+ await setConversationMode(adapter,a,c.conversation.id,'active');await store.finalize(c,{...e,id:id()},'Stale generation after resume',send);expect(send).not.toHaveBeenCalled();
+ await recordOwnerMessage(a,acct.id,jid,manualId,time,'Replayed');await recordOwnerMessage(a,acct.id,jid,id(),new Date(time.getTime()-1000),'Older replay');
+ expect((await db.query<any>('select mode from conversations where id=$1',[c.conversation.id])).rows[0].mode).toBe('active');
+ await reserveOutbound(a,acct.id,jid,'BOT-ECHO');expect(await isGeneratedMessage(a,acct.id,jid,'BOT-ECHO')).toBe(true);expect(await isGeneratedMessage(a,acct.id,'alias@s.whatsapp.net','BOT-ECHO')).toBe(true);expect(await isGeneratedMessage(b,acct.id,jid,'BOT-ECHO')).toBe(false);
+ expect((await db.query("select * from messages where conversation_id=$1 and sender='staff'",[c.conversation.id])).rows).toHaveLength(2);
+});
+it('VIP ignore bypasses the model and appointments and foreign contacts cannot be changed',async()=>{
+ const acct=(await db.query<any>("insert into whatsapp_accounts(organization_id,authenticated_jid,status,owner_availability) values($1,$2,'connected','away') returning *",[a,id()+'@s.whatsapp.net'])).rows[0];
+ const jid=id()+'@lid',contact=(await db.query<any>("insert into contacts(organization_id,identity,assistant_behavior) values($1,$2,'ignore') returning id",[a,jid])).rows[0];
+ const decide=vi.fn(),send=vi.fn(),reply=vi.fn();const pipe=new MessagePipeline(new PgStore(),{select:vi.fn(),decide},{reply} as any);await pipe.bind(acct.session_id,acct.authenticated_jid,{send});
+ await pipe.receive(acct.session_id,{id:id(),jid,text:'Book tomorrow at 3'});expect(decide).not.toHaveBeenCalled();expect(reply).not.toHaveBeenCalled();expect(send).not.toHaveBeenCalled();
+ state.user=bob;const result=await app.inject({method:'PATCH',url:`/organizations/${b}/vip-contacts/${contact.id}`,headers:{authorization:'Bearer valid'},payload:{name:'Forged',behavior:'normal',instructions:''}});expect(result.statusCode).toBe(403);state.user=alice;
+});
+it('new attention endpoints enforce owner membership and cannot read another workspace conversation',async()=>{
+ const foreign=(await db.query<any>('select id from conversations where organization_id=$1 limit 1',[b])).rows[0];
+ const headers={authorization:'Bearer valid'};
+ expect((await app.inject({url:`/organizations/${b}/attention`,headers})).statusCode).toBe(403);
+ if(foreign)expect((await app.inject({url:`/organizations/${a}/attention/conversations/${foreign.id}`,headers})).statusCode).toBe(403);
+ const response=await app.inject({url:`/organizations/${a}/attention`,headers});expect(response.statusCode).toBe(200);expect(response.json().preferences.include_preview).toBe(false);
+});
+it('outbox fanout is deduplicated and rechecks recipient preferences before delivery',async()=>{
+ const {PushWorker}=await import('../apps/api/src/notifications.js');const webpush=await import('web-push');
+ const keys=webpush.generateVAPIDKeys(),saved={...process.env};Object.assign(process.env,{VAPID_PUBLIC_KEY:keys.publicKey,VAPID_PRIVATE_KEY:keys.privateKey,VAPID_SUBJECT:'mailto:test@example.com'});
+ await db.exec('create or replace function pg_try_advisory_xact_lock(integer) returns boolean language sql as $$ select true $$');
+ const subscription=(await db.query<any>("insert into push_subscriptions(organization_id,principal,endpoint,keys) values($1,$2,$3,'{}') returning id",[a,'admin:'+alice,'https://fcm.googleapis.com/wp/'+id()])).rows[0];
+ const dedup=id();await db.query("select queue_attention($1,null,'urgent','Call requested','PRIVATE_PREVIEW','PRIVATE_NAME',$2)",[a,dedup]);await db.query("select queue_attention($1,null,'urgent','Call requested','PRIVATE_PREVIEW','PRIVATE_NAME',$2)",[a,dedup]);
+ const event=(await db.query<any>('select id from attention_events where organization_id=$1 and dedup_key=$2',[a,dedup])).rows[0];
+ expect((await db.query('select * from push_deliveries where event_id=$1',[event.id])).rows).toHaveLength(1);
+ const send=vi.fn(async(_subscription:any,_payload:string,_options:any)=>({statusCode:201}));const worker=new PushWorker(send);await worker.tick();await worker.tick();expect(send).toHaveBeenCalledTimes(1);expect(send.mock.calls[0]![1]).not.toContain('PRIVATE');
+ await db.query("insert into notification_preferences(organization_id,principal,enabled) values($1,$2,false) on conflict(organization_id,principal) do update set enabled=false",[a,'admin:'+alice]);
+ await db.query("select queue_attention($1,null,'urgent','Later message','','',$2)",[a,id()]);await worker.tick();expect(send).toHaveBeenCalledTimes(1);
+ await db.query('delete from push_subscriptions where id=$1',[subscription.id]);await db.query('delete from notification_preferences where organization_id=$1 and principal=$2',[a,'admin:'+alice]);
+ for(const key of ['VAPID_PUBLIC_KEY','VAPID_PRIVATE_KEY','VAPID_SUBJECT']){if(saved[key]===undefined)delete process.env[key];else process.env[key]=saved[key];}
+});
+
+it('push transport failures retry, expired endpoints are pruned, and revoked portal sessions receive nothing',async()=>{
+ const {PushWorker}=await import('../apps/api/src/notifications.js');const {generateVAPIDKeys}=await import('web-push');const keys=generateVAPIDKeys();
+ const old={...process.env};Object.assign(process.env,{VAPID_PUBLIC_KEY:keys.publicKey,VAPID_PRIVATE_KEY:keys.privateKey,VAPID_SUBJECT:'mailto:test@example.com'});
+ const subscription=(await db.query<any>("insert into push_subscriptions(organization_id,principal,endpoint,keys) values($1,$2,$3,'{}') returning id",[a,'admin:'+alice,'https://fcm.googleapis.com/wp/'+id()])).rows[0];
+ await db.query("select queue_attention($1,null,'urgent','Retry test','','',$2)",[a,id()]);
+ const transient=vi.fn(async()=>{throw Object.assign(Error('temporary'),{statusCode:503})});await new PushWorker(transient).tick();
+ expect(transient).toHaveBeenCalledTimes(1);expect((await db.query<any>('select state,attempts from push_deliveries where subscription_id=$1',[subscription.id])).rows[0]).toMatchObject({state:'pending',attempts:1});
+ await db.query('update push_deliveries set next_attempt_at=now() where subscription_id=$1',[subscription.id]);
+ const expired=vi.fn(async()=>{throw Object.assign(Error('gone'),{statusCode:410})});await new PushWorker(expired).tick();expect(expired).toHaveBeenCalledTimes(1);
+ expect((await db.query('select * from push_subscriptions where id=$1',[subscription.id])).rows).toHaveLength(0);
+ const revoked=(await db.query<any>("insert into push_subscriptions(organization_id,principal,endpoint,keys) values($1,$2,$3,'{}') returning id",[a,'portal:'+'a'.repeat(64),'https://fcm.googleapis.com/wp/'+id()])).rows[0];
+ await db.query("select queue_attention($1,null,'urgent','Revoked session test','','',$2)",[a,id()]);const send=vi.fn(async()=>{});await new PushWorker(send).tick();expect(send).not.toHaveBeenCalled();
+ expect((await db.query<any>('select state from push_deliveries where subscription_id=$1',[revoked.id])).rows[0].state).toBe('skipped');await db.query('delete from push_subscriptions where id=$1',[revoked.id]);
+ for(const key of ['VAPID_PUBLIC_KEY','VAPID_PRIVATE_KEY','VAPID_SUBJECT']){if(old[key]===undefined)delete process.env[key];else process.env[key]=old[key];}
+});
+
+it('an uncertain handover acknowledgement still persists the pause and owner notification',async()=>{
+ const f=await awayFixture();await db.query("update whatsapp_accounts set owner_availability='away' where id=$1",[f.account.id]);
+ const store=new PgStore(),event={id:id(),jid:f.jid,text:'Urgent, please call me'},c=(await store.load(await store.resolve(f.account.session_id),event))!;await store.claim(c,event);
+ await expect(store.finalize(c,event,'I will let the owner know.',async()=>{throw Error('Uncertain delivery')},{handoff:true,notify:true,category:'urgent',reason:'Urgent call requested'})).rejects.toThrow();
+ expect((await db.query<any>('select mode from conversations where id=$1',[c.conversation.id])).rows[0].mode).toBe('human');
+ expect((await db.query('select * from attention_events where organization_id=$1 and conversation_id=$2',[f.org,c.conversation.id])).rows).toHaveLength(1);
 });

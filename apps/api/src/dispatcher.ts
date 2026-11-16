@@ -41,7 +41,7 @@ export class PgInbox implements InboxRepository {
   private async saveAllowed(session:string,event:Incoming){
     // The browser and message body cannot assign the organization.
     await pool.query(`with a as (select * from whatsapp_accounts where session_id=$1 and status='connected' and authenticated_jid is not null),
-      contact as (insert into contacts(organization_id,identity) select organization_id,$2 from a on conflict(organization_id,identity) do update set identity=excluded.identity returning *),
+      contact as (insert into contacts(organization_id,identity,display_name) select organization_id,$2,nullif($6,'') from a on conflict(organization_id,identity) do update set display_name=coalesce(contacts.display_name,excluded.display_name) returning *),
       conversation as (insert into conversations(organization_id,account_id,contact_id) select a.organization_id,a.id,contact.id from a,contact on conflict(organization_id,account_id,contact_id) do update set contact_id=excluded.contact_id returning *),
       message as (insert into messages(organization_id,conversation_id,external_id,sender,content,ai_context_source) select organization_id,id,$3,'customer',$4,'user' from conversation on conflict do nothing)
       insert into whatsapp_inbox(organization_id,account_id,session_id,customer_jid,external_id,content,message_at,owner_handled_at,state)
@@ -50,7 +50,7 @@ export class PgInbox implements InboxRepository {
       case when h.handled_through>=$5 or r.external_id is not null then 'done' else 'pending' end
       from a left join whatsapp_owner_activity h on h.organization_id=a.organization_id and h.account_id=a.id and h.customer_jid=$2
       left join whatsapp_owner_reads r on r.organization_id=a.organization_id and r.account_id=a.id and r.external_id=$3
-      on conflict(organization_id,account_id,external_id) do nothing`,[session,event.jid,event.id,event.text.slice(0,8000),event.timestamp?new Date(event.timestamp):new Date()]);
+      on conflict(organization_id,account_id,external_id) do nothing`,[session,event.jid,event.id,event.text.slice(0,8000),event.timestamp?new Date(event.timestamp):new Date(),event.name?.slice(0,120)||'']);
   }
   async recover(){await pool.query("update whatsapp_inbox set state='uncertain' where state='processing'");}
   async take(excluded:string[]):Promise<InboxBatch|null>{
