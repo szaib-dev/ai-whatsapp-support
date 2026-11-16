@@ -62,5 +62,13 @@
   "202611160003_attention_push.sql": {
     "sha256": "1e2b18118aed841fafed0ffb04b43f2f1017ef6f2353fd6cc75bddc12f203ac6",
     "backwardCompatible": true
+  },
+  "202611170001_product_controls.sql": {
+    "sha256": "03dd91fafc1c76227dfea715785a9dbdf7b34eb6e3184d9b3a099d367f618b61",
+    "backwardCompatible": true
+  },
+  "202611170002_owner_pause_window.sql": {
+    "sha256": "d1a2aa2eaa22a6264b1dd7c22334b3634914e1e477e82d0b00b33c6dd14f9510",
+    "backwardCompatible": true
   }
 }

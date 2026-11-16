@@ -1,3 +1,5 @@
+import {refreshOwnerPause} from './owner-handover.js';
+import {equivalentConversations} from './contact-identity.js';
 import {withChatPrivacy} from './chat-privacy.js';
 import {OwnerDeferred} from "./owner-availability.js";
 import { pool, audit, publication } from "./db.js";
@@ -31,12 +33,15 @@ export class PgStore implements Store {
         [org, e.jid],
       )
     ).rows[0];
-    const conversation = (
+    let conversation = (
       await pool.query(
         "insert into conversations(organization_id,account_id,contact_id) values($1,$2,$3) on conflict(organization_id,account_id,contact_id) do update set contact_id=excluded.contact_id returning *",
         [org, b.account, contact.id],
       )
     ).rows[0];
+    const suppressed=await refreshOwnerPause(org,b.account,conversation.id,new Date(earliest(e)||Date.now()));
+    conversation=(await pool.query('select * from conversations where organization_id=$1 and id=$2',[org,conversation.id])).rows[0];
+    if(suppressed)conversation={...conversation,mode:'human'};
     const parts=e.parts?.length ? e.parts : [e];
     if(parts.some(p=>p.jid!==e.jid))throw new TenantMismatch('Mixed customer batch');
     await pool.query("insert into messages(organization_id,conversation_id,external_id,sender,content,ai_context_source) select $1::uuid,$2::uuid,v.id,'customer',v.text,'user' from jsonb_to_recordset($3::jsonb) as v(id text,text text) on conflict do nothing",[org,conversation.id,JSON.stringify(parts.map(p=>({id:p.id,text:p.text})))]);
@@ -151,8 +156,9 @@ export class PgStore implements Store {
       // Pause and enqueue attention independently of whether an acknowledgement is sent.
       if(eligible&&(options.handoff||options.notify)){
         if(options.handoff&&conversation.mode==='active'){
-          await db.query("update conversations set mode='human',handoff_reason=$3 where organization_id=$1 and id=$2",[c.organization_id,c.conversation.id,options.reason||'Customer requested staff']);
-          await db.query("update whatsapp_inbox set owner_handled_at=now(),state=case when state='pending' then 'done' else state end where organization_id=$1 and account_id=$2 and customer_jid=$3 and state in ('pending','processing')",[c.organization_id,c.account.id,c.contact.identity]);
+          const ids=await equivalentConversations(db,c.organization_id,c.conversation.id);
+          await db.query("update conversations set mode='human',owner_pause_until=null,handoff_reason=$3 where organization_id=$1 and id=any($2::uuid[])",[c.organization_id,ids,options.reason||'Customer requested staff']);
+          await db.query("update whatsapp_inbox set owner_handled_at=now(),state=case when state='pending' then 'done' else state end where organization_id=$1 and account_id=$2 and customer_jid in (select t.identity from conversations cv join contacts t on t.organization_id=cv.organization_id and t.id=cv.contact_id where cv.organization_id=$1 and cv.id=any($3::uuid[])) and state in ('pending','processing')",[c.organization_id,c.account.id,ids]);
           await db.query("insert into audit_logs(organization_id,event,resource_id) values($1,'ai_staff_handoff',$2)",[c.organization_id,c.conversation.id]);
         }
         await db.query('select queue_attention($1,$2,$3,$4,$5,$6,$7)',[c.organization_id,c.conversation.id,options.category||'handover',options.reason||'Conversation needs your attention',e.text.slice(0,240),contact.display_name||contact.identity,'message:'+e.id]);
@@ -175,7 +181,7 @@ export class PgStore implements Store {
       if(attempted&&(options.handoff||options.notify)){
         // An uncertain acknowledgement must not roll back the owner's alert or pause.
         // A later manual resume still wins over this failed generation.
-        if(options.handoff)await pool.query("update conversations set mode='human',handoff_reason=$3 where organization_id=$1 and id=$2 and mode='active' and assistant_version=$4",[c.organization_id,c.conversation.id,options.reason||'Customer requested staff',c.conversation.assistant_version??0]);
+        if(options.handoff)await pool.query("update conversations set mode='human',owner_pause_until=null,handoff_reason=$3 where organization_id=$1 and id=$2 and mode='active' and assistant_version=$4",[c.organization_id,c.conversation.id,options.reason||'Customer requested staff',c.conversation.assistant_version??0]);
         await pool.query('select queue_attention($1,$2,$3,$4,$5,$6,$7)',[c.organization_id,c.conversation.id,options.category||'handover',options.reason||'Conversation needs attention',e.text.slice(0,240),c.contact.identity,'message:'+e.id]);
       }
       if (attempted)

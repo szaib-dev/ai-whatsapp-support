@@ -1,3 +1,4 @@
+import {saveClinicSchedule} from './booking-schedule.js';
 import type {FastifyInstance} from 'fastify';
 import {randomUUID} from 'node:crypto';
 import {z} from 'zod';
@@ -7,7 +8,7 @@ import {calendarAccess,googleCalendar,appointmentEventId,validateSlot} from './c
 export const ADVANCED_APPOINTMENTS='advanced_appointments';
 export async function featureEnabled(db:any,org:string){return !!(await db.query('select enabled from workspace_features where organization_id=$1 and feature_key=$2',[org,ADVANCED_APPOINTMENTS])).rows[0]?.enabled;}
 const invalid=(message:string)=>new z.ZodError([{code:'custom',path:[],message}]);
-export const appointmentInput=z.object({requestKey:z.string().uuid(),title:z.string().trim().min(1).max(160),customerName:z.string().trim().max(160).default(''),notes:z.string().trim().max(2000).default(''),kind:z.enum(['appointment','blocked']).default('appointment'),startsAt:z.iso.datetime({offset:true}),endsAt:z.iso.datetime({offset:true})}).strict();
+export const appointmentInput=z.object({requestKey:z.string().uuid(),title:z.string().trim().min(1).max(160),customerName:z.string().trim().max(160).default(''),contactNumber:z.string().trim().max(32).regex(/^[+0-9 ()-]*$/).default(''),notes:z.string().trim().max(2000).default(''),kind:z.enum(['appointment','blocked']).default('appointment'),startsAt:z.iso.datetime({offset:true}),endsAt:z.iso.datetime({offset:true})}).strict();
 type Session=(req:any)=>Promise<{organization_id:string;tokenHash:string}>;
 type Tenant=(req:any,owner:boolean,fn:(db:any,org:string,actor:string)=>Promise<unknown>)=>Promise<unknown>;
 
@@ -19,16 +20,16 @@ export async function reserveAppointment(db:any,org:string,input:z.infer<typeof 
  const existing=id?(await db.query('select * from appointment_requests where organization_id=$1 and id=$2 for update',[org,id])).rows[0]:(await db.query('select * from appointment_requests where organization_id=$1 and request_key=$2',[org,input.requestKey])).rows[0];
  if(id&&!existing)throw new Forbidden();
  if(!id&&existing){
-  if(existing.title!==input.title||existing.customer_name!==input.customerName||existing.notes!==input.notes||existing.kind!==input.kind||new Date(existing.starts_at).getTime()!==Date.parse(input.startsAt)||new Date(existing.ends_at).getTime()!==Date.parse(input.endsAt))throw invalid('This request was already saved with different details. Refresh the list before editing it.');
+  if(existing.title!==input.title||existing.customer_name!==input.customerName||existing.contact_number!==input.contactNumber||existing.notes!==input.notes||existing.kind!==input.kind||new Date(existing.starts_at).getTime()!==Date.parse(input.startsAt)||new Date(existing.ends_at).getTime()!==Date.parse(input.endsAt))throw invalid('This request was already saved with different details. Refresh the list before editing it.');
   return existing;
  }
  if(existing&&existing.status!=='booked')throw invalid('Resolve this appointment’s Calendar sync before editing it.');
  let slot;try{slot=validateSlot(input.startsAt,input.endsAt,settings)}catch(e){throw invalid((e as Error).message)}
  const overlap=(await db.query("select 1 from appointment_requests where organization_id=$1 and ($2::uuid is null or id<>$2) and status in ('creating','booked','uncertain') and starts_at<$4 and ends_at>$3 limit 1",[org,id||null,slot.start,slot.end])).rows.length;
  if(overlap)throw invalid('This time overlaps an appointment or blocked slot. Choose another time.');
- const values=[org,id||randomUUID(),slot.start,slot.end,settings.timezone,settings.calendar_id,input.title,input.customerName,input.notes,input.kind,input.requestKey];
- if(id)return (await db.query("update appointment_requests set starts_at=$3,ends_at=$4,title=$5,customer_name=$6,notes=$7,kind=$8,timezone=$9,status='creating',sync_action='save' where organization_id=$1 and id=$2 returning *",[org,id,slot.start,slot.end,input.title,input.customerName,input.notes,input.kind,settings.timezone])).rows[0];
- return (await db.query("insert into appointment_requests(organization_id,id,starts_at,ends_at,timezone,calendar_id,title,customer_name,notes,kind,request_key,source_event,status,sync_action) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::uuid,$11::text,'creating','save') returning *",values)).rows[0];
+ const values=[org,id||randomUUID(),slot.start,slot.end,settings.timezone,settings.calendar_id,input.title,input.customerName,input.notes,input.kind,input.requestKey,input.contactNumber];
+ if(id)return (await db.query("update appointment_requests set starts_at=$3,ends_at=$4,title=$5,customer_name=$6,notes=$7,kind=$8,timezone=$9,status='creating',sync_action='save',contact_number=$10 where organization_id=$1 and id=$2 returning *",[org,id,slot.start,slot.end,input.title,input.customerName,input.notes,input.kind,settings.timezone,input.contactNumber])).rows[0];
+ return (await db.query("insert into appointment_requests(organization_id,id,starts_at,ends_at,timezone,calendar_id,title,customer_name,notes,kind,request_key,contact_number,source_event,status,sync_action) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::uuid,$12,$11::text,'creating','save') returning *",values)).rows[0];
 }
 export async function syncAppointment(org:string,id:string){
  const db=await pool.connect();
@@ -86,20 +87,29 @@ export function registerAppointmentManagement(app:FastifyInstance,tenant:Tenant,
    const result=await fn(db,s.organization_id);await db.query('commit');return result;
   }catch(e){await db.query('rollback');throw e}finally{db.release()}
  }
- app.get('/status-api/appointments',req=>portal(req,async(db,org)=>({appointments:(await db.query('select id,title,customer_name as "customerName",notes,kind,starts_at as "startsAt",ends_at as "endsAt",timezone,status,sync_action as "syncAction" from appointment_requests where organization_id=$1 and starts_at>now()-interval \'365 days\' order by starts_at limit 2000',[org])).rows})));
- app.post('/status-api/appointments',async req=>{const row=await portal(req,(db,org)=>reserveAppointment(db,org,appointmentInput.parse(req.body)));return syncAppointment(row.organization_id,row.id)});
- app.patch('/status-api/appointments/:id',async req=>{const row=await portal(req,(db,org)=>reserveAppointment(db,org,appointmentInput.parse(req.body),z.string().uuid().parse((req.params as any).id)));return syncAppointment(row.organization_id,row.id)});
- app.post('/status-api/appointments/:id/:action',async req=>{
-  const action=z.enum(['cancel','sync']).parse((req.params as any).action);
-  const result=await portal(req,async(db,org)=>{
-   const id=z.string().uuid().parse((req.params as any).id);
-   await db.query('select organization_id from calendar_connections where organization_id=$1 for update',[org]);
-   const row=(await db.query('select * from appointment_requests where organization_id=$1 and id=$2 for update',[org,id])).rows[0];if(!row)throw new Forbidden();
-   if(action==='cancel'){
-    if(!['booked','uncertain'].includes(row.status)&&!(row.status==='creating'&&row.sync_action))throw invalid('This booking is still being confirmed. Wait for confirmation before cancelling.');
-    await db.query("update appointment_requests set sync_action='cancel',status='creating' where organization_id=$1 and id=$2",[org,id]);
-   }
-   return {org,id};
-  });return syncAppointment(result.org,result.id);
- });
+ function install(prefix:string,isPortal:boolean){
+  const scope=(req:any,fn:(db:any,org:string)=>Promise<any>)=>isPortal?portal(req,fn):tenant(req,true,(db,org)=>fn(db,org));
+  app.get(prefix+'/appointments',req=>scope(req,async(db,org)=>({appointments:(await db.query('select id,title,customer_name as "customerName",contact_number as "contactNumber",notes,kind,starts_at as "startsAt",ends_at as "endsAt",timezone,status,sync_action as "syncAction" from appointment_requests where organization_id=$1 and starts_at>now()-interval \'365 days\' order by starts_at limit 2000',[org])).rows})));
+  app.post(prefix+'/appointments',async req=>{const row=await scope(req,(db,org)=>reserveAppointment(db,org,appointmentInput.parse(req.body)));return syncAppointment(row.organization_id,row.id)});
+  app.patch(prefix+'/appointments/:id',async req=>{const row=await scope(req,(db,org)=>reserveAppointment(db,org,appointmentInput.parse(req.body),z.string().uuid().parse((req.params as any).id)));return syncAppointment(row.organization_id,row.id)});
+  app.post(prefix+'/appointments/:id/:action',async req=>{
+   const action=z.enum(['cancel','sync']).parse((req.params as any).action);
+   const result=await scope(req,async(db,org)=>{
+    const id=z.string().uuid().parse((req.params as any).id);
+    await db.query('select organization_id from calendar_connections where organization_id=$1 for update',[org]);
+    const row=(await db.query('select * from appointment_requests where organization_id=$1 and id=$2 for update',[org,id])).rows[0];if(!row)throw new Forbidden();
+    if(action==='cancel'){
+     if(!['booked','uncertain'].includes(row.status)&&!(row.status==='creating'&&row.sync_action))throw invalid('This booking is still being confirmed. Wait for confirmation before cancelling.');
+     await db.query("update appointment_requests set sync_action='cancel',status='creating' where organization_id=$1 and id=$2",[org,id]);
+    }return {org,id};
+   });return syncAppointment(result.org,result.id);
+  });
+ }
+ install('/status-api',true);install('/organizations/:org',false);
+ app.get('/organizations/:org/schedule',req=>tenant(req,true,async(db,org)=>({
+  connection:(await db.query('select calendar_name as "calendarName",status,timezone,booking_enabled as "bookingEnabled",weekdays,opens,closes,duration_minutes as "durationMinutes" from calendar_connections where organization_id=$1',[org])).rows[0]||null,
+  appointments:(await db.query('select id,starts_at as "startsAt",ends_at as "endsAt",timezone,status from appointment_requests where organization_id=$1 and kind=\'appointment\' order by starts_at desc limit 100',[org])).rows,
+  advancedAppointments:true
+ })));
+ app.patch('/organizations/:org/schedule',req=>tenant(req,true,(db,org)=>saveClinicSchedule(db,org,req.body)));
 }

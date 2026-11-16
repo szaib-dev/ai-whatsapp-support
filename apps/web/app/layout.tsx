@@ -1,6 +1,10 @@
 import {MotionSystem} from './ui/motion';
-import './attention.css';
-import './style.css';import './design-system.css';import './motion-system.css';import type {Metadata} from 'next';
+import './globals.css';
+import './product.css';
+import type {Metadata,Viewport} from 'next';
+export const viewport:Viewport={width:'device-width',initialScale:1,viewportFit:'cover'};
+import {TooltipProvider} from '@/components/ui/tooltip';
+import {Toaster} from '@/components/ui/sonner';
 const site=process.env.NEXT_PUBLIC_SITE_URL||'https://codetic.netawaz.pk';
 export const metadata:Metadata={metadataBase:new URL(site),title:'Codetic AI',description:'Thoughtful WhatsApp customer support and Google Calendar appointment scheduling for businesses.',openGraph:{type:'website',siteName:'Codetic AI',title:'Codetic AI',description:'Thoughtful WhatsApp support. Connected appointments.',url:site,images:[{url:'/og.png',width:1200,height:630,alt:'Codetic AI: thoughtful replies, connected business'}]},twitter:{card:'summary_large_image',title:'Codetic AI',description:'Thoughtful WhatsApp support. Connected appointments.'},icons:{icon:'/icon.svg'}};
-export default function Layout({children}:{children:React.ReactNode}){return <html lang="en" data-scroll-behavior="smooth"><head><link rel="preconnect" href="https://fonts.googleapis.com"/><link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous"/><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;650;700;750;800&display=swap" rel="stylesheet"/></head><body><MotionSystem>{children}</MotionSystem></body></html>}
+export default function Layout({children}:{children:React.ReactNode}){return <html lang="en" data-scroll-behavior="smooth"><head><link rel="preconnect" href="https://fonts.googleapis.com"/><link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous"/><link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;650;700;750;800&display=swap" rel="stylesheet"/></head><body><TooltipProvider><MotionSystem>{children}</MotionSystem><Toaster theme="light" closeButton position="bottom-right"/></TooltipProvider></body></html>}

@@ -1,3 +1,4 @@
+import {refreshOwnerPause} from './owner-handover.js';
 import {withChatPrivacy} from './chat-privacy.js';
 import { createHash } from 'node:crypto';
 import { pool } from './db.js';
@@ -36,7 +37,7 @@ export class PgInbox implements InboxRepository {
   async save(session:string,event:Incoming){
     const account=(await pool.query("select organization_id,id from whatsapp_accounts where session_id=$1 and status='connected'",[session])).rows[0];
     if(!account)return;
-    return withChatPrivacy(account.organization_id,account.id,event.jid,()=>this.saveAllowed(session,event),event.timestamp);
+    return withChatPrivacy(account.organization_id,account.id,event.jid,async()=>{await this.saveAllowed(session,event);const c=(await pool.query('select c.id from conversations c join contacts t on t.organization_id=c.organization_id and t.id=c.contact_id where c.organization_id=$1 and c.account_id=$2 and t.identity=$3',[account.organization_id,account.id,event.jid])).rows[0];if(c)await refreshOwnerPause(account.organization_id,account.id,c.id,new Date(event.timestamp||Date.now()));},event.timestamp);
   }
   private async saveAllowed(session:string,event:Incoming){
     // The browser and message body cannot assign the organization.
@@ -71,7 +72,7 @@ export class PgInbox implements InboxRepository {
       const ids=selected.map(r=>r.id);
       await db.query("update whatsapp_inbox set state='processing',attempts=attempts+1 where organization_id=$1 and id=any($2::uuid[])",[candidate.organization_id,ids]);
       await db.query('commit');
-      return {ids,key:`${candidate.organization_id}/${candidate.account_id}/${candidate.customer_jid}`,session:candidate.session_id,events:selected.map(r=>({id:r.external_id,jid:r.customer_jid,text:r.content,timestamp:new Date(r.received_at).getTime()}))};
+      return {ids,key:`${candidate.organization_id}/${candidate.account_id}/${candidate.customer_jid}`,session:candidate.session_id,events:selected.map(r=>({id:r.external_id,jid:r.customer_jid,text:r.content,timestamp:new Date(r.message_at).getTime()}))};
     }catch(e){await db.query('rollback').catch(()=>{});throw e;}
     finally{db.release();}
   }

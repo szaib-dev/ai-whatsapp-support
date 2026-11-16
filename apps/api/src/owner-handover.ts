@@ -1,3 +1,4 @@
+import {equivalentConversations} from './contact-identity.js';
 import {pool} from './db.js';
 import {withChatPrivacy} from './chat-privacy.js';
 
@@ -21,14 +22,41 @@ export async function recordOwnerMessage(org:string,account:string,jid:string,id
    if(!seen.rowCount){await db.query('commit');return;}
    const contact=(await db.query('insert into contacts(organization_id,identity) values($1,$2) on conflict(organization_id,identity) do update set identity=excluded.identity returning id',[org,jid])).rows[0];
    const c=(await db.query('insert into conversations(organization_id,account_id,contact_id) values($1,$2,$3) on conflict(organization_id,account_id,contact_id) do update set contact_id=excluded.contact_id returning *',[org,account,contact.id])).rows[0];
+   const aliases=await equivalentConversations(db,org,c.id);
    // Replayed device history must not undo a later manual resume.
-   if((!c.last_owner_message_at||new Date(c.last_owner_message_at)<time)&&(!c.assistant_resumed_at||new Date(c.assistant_resumed_at)<time)){
-    await db.query("update conversations set mode='human',assistant_version=assistant_version+1,handoff_reason='Owner replied on WhatsApp',last_owner_message_at=$3 where organization_id=$1 and id=$2",[org,c.id,time]);
-    await db.query("update whatsapp_inbox set owner_handled_at=now(),state=case when state='pending' then 'done' else state end where organization_id=$1 and account_id=$2 and customer_jid=$3 and state in ('pending','processing')",[org,account,jid]);
+   if(!(await db.query('select 1 from conversations where organization_id=$1 and id=any($2::uuid[]) and (last_owner_message_at >= $3 or (assistant_resumed_at >= $3 and owner_pause_until is null)) limit 1',[org,aliases,time])).rows.length){
+    await db.query("update conversations set mode='human',assistant_version=assistant_version+1,handoff_reason='Owner replied on WhatsApp',last_owner_message_at=$3,owner_pause_until=$3::timestamptz+interval '30 minutes' where organization_id=$1 and id=any($2::uuid[])",[org,aliases,time]);
+    await db.query("update whatsapp_inbox set owner_handled_at=now(),state=case when state='pending' then 'done' else state end where organization_id=$1 and account_id=$2 and customer_jid in (select t.identity from conversations c join contacts t on t.organization_id=c.organization_id and t.id=c.contact_id where c.organization_id=$1 and c.id=any($3::uuid[])) and state in ('pending','processing')",[org,account,aliases]);
     await db.query('select queue_attention($1,$2,\'handover\',\'Owner replied on WhatsApp; assistant paused\',$3,\'\',$4)',[org,c.id,text.slice(0,240),'owner:'+account+':'+id]);
    }
    await db.query("insert into messages(organization_id,conversation_id,external_id,sender,content,status,ai_context_source,created_at) values($1,$2,$3,'staff',$4,'sent','unclassified',$5) on conflict do nothing",[org,c.id,id,text.slice(0,8000)||'[WhatsApp attachment]',time]);
    await db.query('commit');
   }catch(e){await db.query('rollback');throw e}finally{db.release()}
  });
+}
+
+/** Serialize timer changes with owner sends. Only messages after the quiet window may resume. */
+export async function refreshOwnerPause(org:string,account:string,conversation:string,messageAt:Date){
+ const db=await pool.connect();
+ try{
+  await db.query('begin');
+  await db.query('select id from whatsapp_accounts where organization_id=$1 and id=$2 for no key update',[org,account]);
+  const ids=await equivalentConversations(db,org,conversation);
+  const rows=(await db.query('select mode,owner_pause_until,last_owner_message_at from conversations where organization_id=$1 and id=any($2::uuid[]) and owner_pause_until is not null order by owner_pause_until desc',[org,ids])).rows;
+  const window=rows[0];let suppressed=false;
+  if(window){
+   const until=new Date(window.owner_pause_until),now=new Date();
+   suppressed=messageAt<until;
+   if(rows.some((r:any)=>r.mode==='human')&&until>now){
+    suppressed=true;
+    await db.query("update conversations set mode='human',owner_pause_until=$3,last_owner_message_at=$4,handoff_reason='Owner replied; 30-minute quiet window' where organization_id=$1 and id=any($2::uuid[]) and (mode='active' or owner_pause_until is not null)",[org,ids,until,window.last_owner_message_at]);
+   }else if(until<=now&&messageAt>=until){
+    await db.query("update conversations set mode='active',handoff_reason=null where organization_id=$1 and id=any($2::uuid[]) and mode='human' and owner_pause_until<=now()",[org,ids]);
+    await db.query("update attention_events set resolved_at=now() where organization_id=$1 and conversation_id=any($2::uuid[]) and resolved_at is null and category<>'appointment'",[org,ids]);
+   }
+   // Never send a delayed reply to messages received while the owner was handling it.
+   await db.query("update whatsapp_inbox set owner_handled_at=now(),state=case when state='pending' then 'done' else state end where organization_id=$1 and account_id=$2 and message_at<$4 and customer_jid in (select t.identity from conversations c join contacts t on t.organization_id=c.organization_id and t.id=c.contact_id where c.organization_id=$1 and c.id=any($3::uuid[])) and state in ('pending','processing')",[org,account,ids,until]);
+  }
+  await db.query('commit');return suppressed;
+ }catch(e){await db.query('rollback');throw e}finally{db.release()}
 }

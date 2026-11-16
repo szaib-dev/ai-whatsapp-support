@@ -1,44 +1,35 @@
-# Codetic interface and motion refinements
+# Codetic product interface — 17 November 2026
 
-The landing page uses a layered product window, a warm ambient light field and a responsive bento composition. The previews illustrate the inbox, Google Calendar scheduling, staff handover and separate business workspaces. They contain anonymous sample UI, are labelled as illustrative, and do not fetch customer data or invent business statistics. Existing integration and privacy disclosures remain visible. The former dark marketing section is replaced with a light setup flow.
+The public site uses editorial typography, asymmetric sections and abstract supporting graphics. The former dashboard illustration, floating UI cards and tilted feature mockups have been removed, together with their unused components and stylesheets.
 
-The dashboard overview now shows actual workspace connection, knowledge-publication and reply-enabled state instead of a promotional welcome panel. Existing API requests, feature permissions, authentication, WhatsApp and Calendar behavior are unchanged.
+The authenticated application uses real shadcn/ui components generated into `apps/web/components/ui`, Radix accessibility primitives, Lucide icons, and shared tokens in `app/globals.css`. `app/product.css` owns functional product layouts; `(public)/editorial.css` owns public layouts. The shared `FormDialog`, `ConfirmDialog`, `DateTimeField` and `TimeSelect` compose those primitives.
 
-## Shared motion
+## Motion
 
-`app/ui/motion.tsx` provides the Motion configuration and reusable components. `app/motion-system.css` provides matching CSS transitions.
+`app/ui/motion.tsx` configures Motion and provides page/tab entrances, reveal transitions and toast feedback. Radix data-state animations cover dialogs, popovers, menus, sheets and accordions. Buttons use 180ms background, border, shadow and press transitions; icon arrows move subtly on hover. Component transitions use 200–350ms, selected entrances use 500ms. Reduced-motion preferences disable nonessential movement. There is no global DOM animation observer.
 
-| Interaction | Duration | Behavior |
-| --- | --- | --- |
-| Hover, press, switches | 150–200 ms | Small transform, color and shadow changes |
-| Menus and component state | 200–350 ms | Short opacity/position transitions |
-| Native dialog close | 160 ms | Close only after the exit finishes; preserve native focus restoration |
-| Section entrance | 500 ms | One-time viewport-triggered fade and 18 px rise |
-| Updated statistics | 400 ms | Animate between actual values; no fabricated initial count-up |
+## Product navigation
 
-The shared easing is `cubic-bezier(.22, 1, .36, 1)`. Main motion uses transforms and opacity. FAQ expansion and supported native details use intrinsic height to keep surrounding content in normal document flow. Product previews float gently; ambient gradients move slowly. Both stop with reduced-motion preferences.
+The admin workspace uses a collapsible shadcn Sidebar, a full-height mobile Sheet, workspace combobox, searchable command menu, notification indicator and direct account/sign-out controls. Inbox selection opens a dedicated phone conversation view. Owner replies show a pause deadline and restart a rolling 30-minute quiet window; explicit takeover/resume controls remain available. The composer responds to visualViewport resizing; a physical mobile keyboard still requires device testing.
 
-- `MotionView` enters a newly selected page or tab immediately. It does not keep previous workspace data mounted for an exit animation. Its key must match the actual navigation state, rather than polling data.
-- `MotionNotice` animates feedback entry and dismissal. `DrawerBackdrop` handles mobile sidebar backdrop presence.
-- `useDialogMotion` / `closeDialogElement` retain native modal semantics. Cancel, Escape, close buttons and successful appointment saves share the closing transition. Busy protections remain in the existing handlers.
-- Calendar month transitions affect the grid, keeping navigation buttons mounted so keyboard focus stays on the selected month-navigation control.
-- Radix select menus retain their existing keyboard/typeahead behavior and animate using their open/closed data attributes. Mobile public navigation supports Escape, focus restoration, outside-click dismissal and closing after a destination is selected.
-- The interface observer animates newly inserted loading results and feedback without replacing application state or timers. It disconnects on cleanup and skips Motion-managed notices.
-- `MotionConfig`, `useReducedMotion` and the CSS `prefers-reduced-motion` rules respect the system preference. Native details retain their normal behavior when intrinsic-size animation is unsupported.
+The standalone client portal has a compact header and Home / Appointments / Connections / More bottom navigation. Backend permissions deny conversation and VIP endpoints to portal sessions. Portal attention responses and pushes never contain messages, sender names, private reasons, conversation IDs or inbox links. Generic notification history is available in Notifications. Online/offline remains a manual assistant control and is never changed by login/logout.
 
-## Visual and interaction review
+Appointments share server conflict checking and Google synchronization between owner administration and premium client access. Date selection uses Calendar/Popover; time and duration use custom Select controls. The mobile editor fills the viewport. Privacy confirmations use centered AlertDialogs, retain list position and update a contact after the server confirms the stop. Locked appointment previews render abstract geometry, never private records underneath blur.
 
-Browser review used actual rendered application components with an isolated local fixture for authenticated states. No customer records or external Google/WhatsApp operations were changed. The fixture is removed before the production build.
+## Verification
 
-Reviewed the landing page and all eight administrator and four client-portal sections at 360, 390, 768, 1024 and 1920 px. The checks included horizontal overflow and clipped landing-page headings, screenshots at desktop/mobile sizes, navigation, FAQ expansion/collapse, native dialog opening/closing, appointment creation/editing, toast feedback, select menus, month navigation and premium locking/unlocking. Calendar navigation retained keyboard focus. The locked state had no rendered appointment editor. Public legal/support pages and sign-in layouts were also checked after the shared-style changes.
+The rendered public landing page, admin settings and client privacy layout were screenshot-reviewed at 320, 360, 390, 430, 768, 1024, 1440 and 1920 px, with no page-level horizontal overflow. Additional desktop/mobile review covered the inbox, appointment editor, custom calendar/time menu, premium lock, knowledge editor, connections, authentication, mobile Sheet and account menus. Functional UI checks used the actual components in isolated sample workspaces; those temporary routes were removed before the production build.
 
-Run the existing test suite, production build, typecheck, lint and dependency audit before release. Browser testing validates UI behavior; the existing backend regression tests continue to validate authorization and booking consistency.
+Observed interactions include command search/navigation, sidebar collapse, mobile destination dismissal, conversation resume, appointment creation/editing, client sign-out, and stopping a scrolled privacy contact without changing scroll position. Tests cover server authorization, premium access, alias grouping, handover/replay, booking conflicts and notification privacy. UI fixtures do not establish successful real Google or WhatsApp operations.
 
-## Final verification — 16 November 2026
+Physical keyboard behavior, a fresh successful credential login, real WhatsApp pairing, real Google synchronization and background OS push receipt were not verified during this redesign. Deployment still requires genuine operator/contact information, public HTTPS origins and legal/provider/backup review; configuration checks must not be bypassed.
 
-- Production build, TypeScript checks and ESLint passed.
-- Regression suite: 210 tests passed; one test skipped (14 files passed, one skipped).
-- Production dependency audit: zero vulnerabilities. `git diff --check` passed.
-- Rechecked the production landing page in the browser at desktop and 390/360 px mobile widths. Reviewed hero and workflow previews, FAQ expansion/collapse, mobile navigation and Escape dismissal. No horizontal page overflow was observed. Also reviewed mobile administrator/client sign-in and privacy layouts; the final landing page had no captured console warnings or errors.
-- Authenticated interactions were covered by the earlier isolated-fixture review described above. They were not repeated against a live backend during this final pass because the local API was offline; the client login correctly showed its service-unavailable feedback.
-- Deployment remains blocked by production configuration validation: operator identity/country, support/privacy contacts, backup retention description, public HTTPS web/API origins, disabling local Calendar OAuth, and operator confirmation of legal disclosures/provider data terms. These require real deployment values and review; they were not fabricated or bypassed.
+## Final release checks
+
+- 233 automated tests passed; one existing test skipped (16 files passed, one skipped).
+- TypeScript checks, ESLint, production build and diff whitespace checks passed.
+- Production dependency audit reported zero vulnerabilities.
+- Both additive migrations applied successfully to the local configured database.
+- The final build was reviewed on port 3000; the API health endpoint on 3101 returned `ok`.
+- The local WhatsApp worker still reported recovery during initialization. Pairing credentials were preserved; another worker's database lease was not forcefully terminated.
+- The production configuration check continues to require operator identity/country, support/privacy contacts, backup retention, HTTPS web/API origins, disabling local OAuth and operator legal/provider confirmations. These are deployment prerequisites, not fabricated values.

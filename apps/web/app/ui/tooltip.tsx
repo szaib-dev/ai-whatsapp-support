@@ -1,3 +1,3 @@
 "use client";
-import {cloneElement,useId,type ReactElement} from 'react';
-export function Tooltip({label,children}:{label:string;children:ReactElement<{'aria-describedby'?:string}>}){const id=useId();return <span className="tooltip">{cloneElement(children,{'aria-describedby':id})}<span className="tooltip-content" id={id} role="tooltip">{label}</span></span>}
+import type {ReactNode} from 'react';import {Tooltip as Root,TooltipContent,TooltipTrigger} from '@/components/ui/tooltip';
+export function Tooltip({label,children}:{label:string;children:ReactNode}){return <Root><TooltipTrigger asChild>{children}</TooltipTrigger><TooltipContent>{label}</TooltipContent></Root>}

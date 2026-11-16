@@ -32,7 +32,7 @@ it('allows only known browser push service HTTPS endpoints',()=>{
 it('hides sensitive payload details by default and scopes deep links to the workspace',()=>{
  const event={id:'event',organization_id:'workspace',conversation_id:'chat',reason:'Urgent call',preview:'PRIVATE_PREVIEW',sender_name:'PRIVATE_NAME'};
  const hidden=notificationPayload(event,false,false);expect(JSON.stringify(hidden)).not.toContain('PRIVATE');expect(hidden.url).toContain('workspace=workspace');expect(hidden.url).toContain('conversation=chat');
- expect(notificationPayload(event,true,true)).toMatchObject({title:'PRIVATE_NAME',body:'Urgent call · PRIVATE_PREVIEW'});
+ expect(notificationPayload(event,true,false)).toMatchObject({title:'PRIVATE_NAME',body:'Urgent call · PRIVATE_PREVIEW'});expect(JSON.stringify(notificationPayload(event,true,true))).not.toContain('PRIVATE');expect(notificationPayload(event,true,true).url).not.toContain('conversation=');
 });
 
 it('normalizes provider metadata and handover acknowledgement variations without inventing replies',()=>{

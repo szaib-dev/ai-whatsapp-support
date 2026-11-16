@@ -30,6 +30,8 @@ beforeAll(async () => {
   await db.exec(readFileSync("supabase/migrations/202611160001_chat_privacy.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611160002_advanced_appointments.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611160003_attention_push.sql", "utf8"));
+  await db.exec(readFileSync("supabase/migrations/202611170001_product_controls.sql", "utf8"));
+  await db.exec(readFileSync("supabase/migrations/202611170002_owner_pause_window.sql", "utf8"));
   await db.query("insert into auth.users values($1),($2)", [alice, bob]);
   await db.query(
     "insert into organizations(id,name) values($1,'Revive'),($2,'Zorro')",

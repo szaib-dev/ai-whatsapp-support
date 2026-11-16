@@ -1,4 +1,5 @@
 import "dotenv/config";
+import {conversationIdentities,groupConversations,equivalentConversations} from './contact-identity.js';
 import {PushWorker} from './notifications.js';
 import {setConversationMode} from './attention-routes.js';
 import {validateEnvironment} from "./config.js";
@@ -140,7 +141,7 @@ export async function buildServer(whatsapp?: WhatsAppManager,options:{pushWorker
   });
   app.get("/health", async () => ({ status: "ok" }));
   app.get("/organizations/:org/whatsapp", req => tenant(req, true, async (db, org) => {
-    const accounts = (await db.query("select id,status,authenticated_jid,owner_availability,owner_status_at from whatsapp_accounts where organization_id=$1 and removed_at is null order by id", [org])).rows;
+    const accounts = (await db.query("select id,status,authenticated_jid,owner_availability,owner_status_at,last_connected_at,last_connection_error,needs_pairing from whatsapp_accounts where organization_id=$1 and removed_at is null order by id", [org])).rows;
     const policy=(await db.query('select reply_only_when_away from organizations where id=$1',[org])).rows[0];
     return { onlyWhenAway:!!policy?.reply_only_when_away, enabled: !!whatsapp?.ready, accounts: accounts.map((a: any) => ({ ...a, status: whatsapp?.state(org, a.id, a.status) || a.status, qr: whatsapp?.qr(org, a.id) || null })) };
   }));
@@ -174,7 +175,7 @@ export async function buildServer(whatsapp?: WhatsAppManager,options:{pushWorker
   }));
   app.get("/organizations", async (req) => {
     const actor = await administrator(req);
-    return (
+    const businesses=(
       await pool.query(
         `select o.*,m.role,
           (select count(*)::int from whatsapp_accounts a where a.organization_id=o.id and a.removed_at is null and a.status='connected') as connected_accounts,
@@ -186,6 +187,8 @@ export async function buildServer(whatsapp?: WhatsAppManager,options:{pushWorker
         [actor],
       )
     ).rows;
+    const accounts=(await pool.query('select id,organization_id,status from whatsapp_accounts where removed_at is null and organization_id=any($1::uuid[])',[businesses.map(b=>b.id)])).rows;
+    return businesses.map(b=>({...b,connected_accounts:accounts.filter(a=>a.organization_id===b.id&&whatsapp?.ready&&whatsapp.state(b.id,a.id,a.status)==='connected').length}));
   });
   app.post('/organizations',async req=>{
     const actor=await administrator(req);
@@ -229,7 +232,9 @@ export async function buildServer(whatsapp?: WhatsAppManager,options:{pushWorker
     if(!whatsapp?.ready || account?.status!=='connected' || account?.removed_at)throw new Unavailable();
     const existing=(await db.query('select status from messages where organization_id=$1 and conversation_id=$2 and external_id=$3',[org,id,requestId])).rows[0];
     if(existing)return existing;
-    await db.query("update conversations set mode='human' where organization_id=$1 and id=$2",[org,id]);
+    await setConversationMode(db,org,id,'human');
+    const ids=await equivalentConversations(db,org,id);
+    await db.query("update conversations set last_owner_message_at=now(),owner_pause_until=now()+interval '30 minutes',handoff_reason='Owner replied from dashboard' where organization_id=$1 and id=any($2::uuid[])",[org,ids]);
     await db.query("insert into messages(organization_id,conversation_id,external_id,sender,content,status) values($1,$2,$3,'staff',$4,'sending')",[org,id,requestId,text]);
     // Persist intent before the external effect. Duplicate request IDs never resend.
     await db.query('commit');await db.query('begin');
@@ -364,22 +369,8 @@ export async function buildServer(whatsapp?: WhatsAppManager,options:{pushWorker
         ).rows,
     ),
   );
-  app.get("/organizations/:org/conversations", (req) =>
-    tenant(
-      req,
-      false,
-      async (db, org) =>
-        (
-          await db.query(
-            `select c.*,p.identity,p.display_name,
-              (select content from messages m where m.organization_id=c.organization_id and m.conversation_id=c.id order by created_at desc limit 1) as last_message,
-              (select max(created_at) from messages m where m.organization_id=c.organization_id and m.conversation_id=c.id) as last_activity
-            from conversations c join contacts p on p.organization_id=c.organization_id and p.id=c.contact_id where c.organization_id=$1 order by last_activity desc nulls last limit 100`,
-            [org],
-          )
-        ).rows,
-    ),
-  );
+  app.get('/organizations/:org/conversations',req=>tenant(req,false,async(db,org)=>groupConversations(await conversationIdentities(db,org))));
+  app.post('/organizations/:org/conversations/:id/read',req=>tenant(req,false,async(db,org)=>{const ids=await equivalentConversations(db,org,uuid.parse((req.params as any).id));if(!ids.length)throw new Forbidden();await db.query('update conversations set last_read_at=now() where organization_id=$1 and id=any($2::uuid[])',[org,ids]);return {ok:true};}));
   app.get("/organizations/:org/conversations/:id", (req) =>
     tenant(req, false, async (db, org) => {
       const id = uuid.parse((req.params as any).id),
@@ -390,12 +381,14 @@ export async function buildServer(whatsapp?: WhatsAppManager,options:{pushWorker
           )
         ).rows[0];
       if (!c) throw new Forbidden();
+      const ids=await equivalentConversations(db,org,id);
+      const identity=groupConversations(await conversationIdentities(db,org,ids)).find((r:any)=>r.conversation_ids.includes(id));
       return {
-        conversation: c,
+        conversation: {...c,...identity,id:c.id,contact_id:c.contact_id},
         messages: (
           await db.query(
-            "select * from messages where organization_id=$1 and conversation_id=$2 and created_at>=now()-interval '30 days' order by created_at desc limit 100",
-            [org, id],
+            "select * from messages where organization_id=$1 and conversation_id=any($2::uuid[]) and created_at>=now()-interval '30 days' order by created_at desc limit 100",
+            [org, ids],
           )
         ).rows.reverse(),
         memories: (

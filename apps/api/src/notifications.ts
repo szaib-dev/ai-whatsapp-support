@@ -16,8 +16,9 @@ export function validPushEndpoint(input:string){
 export function notificationPayload(event:any,preview:boolean,portal:boolean){
  const url=new URL(portal?'/status':'/admin',process.env.WEB_ORIGIN||'http://localhost:3000');
  url.searchParams.set('workspace',event.organization_id);
- if(event.conversation_id)url.searchParams.set('conversation',event.conversation_id);
+ if(!portal&&event.conversation_id)url.searchParams.set('conversation',event.conversation_id);
  else url.searchParams.set('attention','1');
+ preview=preview&&!portal;
  return {id:event.id,title:preview?(event.sender_name||'Codetic AI'):'Codetic AI',
   body:preview?[event.reason,event.preview].filter(Boolean).join(' · '):'Your workspace needs attention. Open Codetic AI to review.',
   tag:'codetic-'+event.id,url:url.pathname+url.search};

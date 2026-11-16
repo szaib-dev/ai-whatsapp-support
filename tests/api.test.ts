@@ -90,6 +90,8 @@ beforeAll(async () => {
   await db.exec(readFileSync("supabase/migrations/202611160001_chat_privacy.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611160002_advanced_appointments.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611160003_attention_push.sql", "utf8"));
+  await db.exec(readFileSync("supabase/migrations/202611170001_product_controls.sql", "utf8"));
+  await db.exec(readFileSync("supabase/migrations/202611170002_owner_pause_window.sql", "utf8"));
   await db.query("insert into auth.users values($1),($2)", [alice, bob]);
   await db.query(
     "insert into organizations(id,name) values($1,'Revive'),($2,'Zorro')",
@@ -643,7 +645,7 @@ it('clinic chat controls expose phone numbers only, scoped to the authenticated 
  await other.inbox.save(other.account.session_id,{id:id(),jid:'441234567891@s.whatsapp.net',text:'OTHER_CLINIC_CANARY'});
  expect((await app.inject({url:'/status-api/chat-controls'})).statusCode).toBe(403);
  const response=await app.inject({url:'/status-api/chat-controls',headers:{cookie:f.cookie}});
- expect(response.statusCode).toBe(200);expect(response.json()).toEqual({numbers:[{phone:'923001234567',stopped:false}],hasMore:false});
+ expect(response.statusCode).toBe(200);expect(response.json()).toEqual({numbers:[{phone:'923001234567',stopped:false,name:null}],hasMore:false,offset:0});
  for(const secret of ['PRIVATE_CHAT_CONTENT_CANARY','OTHER_CLINIC_CANARY','441234567891',f.account.id])expect(response.body).not.toContain(secret);
  expect((await app.inject({method:'PUT',url:'/status-api/chat-controls',headers:{cookie:f.cookie},payload:{phone:'923001234567',stopped:true}})).statusCode).toBe(403);
  expect((await app.inject({method:'PUT',url:'/status-api/chat-controls',headers:f.headers,payload:{phone:'923001234567',stopped:true,organization_id:other.org}})).statusCode).toBe(400);
@@ -900,4 +902,90 @@ it('an uncertain handover acknowledgement still persists the pause and owner not
  await expect(store.finalize(c,event,'I will let the owner know.',async()=>{throw Error('Uncertain delivery')},{handoff:true,notify:true,category:'urgent',reason:'Urgent call requested'})).rejects.toThrow();
  expect((await db.query<any>('select mode from conversations where id=$1',[c.conversation.id])).rows[0].mode).toBe('human');
  expect((await db.query('select * from attention_events where organization_id=$1 and conversation_id=$2',[f.org,c.conversation.id])).rows).toHaveLength(1);
+});
+
+it('client portal cannot retrieve conversations, message previews, VIP instructions or preview notifications',async()=>{
+ const f=await privacyFixture(),event={id:id(),jid:'923001234568@s.whatsapp.net',text:'CLIENT_MESSAGE_PRIVACY_CANARY'};await f.inbox.save(f.account.session_id,event);
+ const c=(await db.query<any>('select id from conversations where organization_id=$1',[f.org])).rows[0];
+ await db.query("select queue_attention($1,$2,'owner','REASON_CANARY','PREVIEW_CANARY','SENDER_CANARY',$3)",[f.org,c.id,id()]);
+ const feed=await app.inject({url:'/status-api/attention',headers:f.headers});expect(feed.statusCode).toBe(200);
+ for(const secret of ['CLIENT_MESSAGE_PRIVACY_CANARY','REASON_CANARY','PREVIEW_CANARY','SENDER_CANARY',c.id])expect(feed.body).not.toContain(secret);
+ expect(feed.json().conversations).toEqual([]);expect(feed.json().preferences.include_preview).toBe(false);
+ for(const url of ['/status-api/attention/conversations/'+c.id,'/status-api/vip-contacts'])expect((await app.inject({url,headers:f.headers})).statusCode).toBe(403);
+ expect((await app.inject({method:'POST',url:'/status-api/attention/conversations/'+c.id+'/mode',headers:f.headers,payload:{mode:'active'}})).statusCode).toBe(403);
+ expect((await app.inject({method:'PUT',url:'/status-api/notification-preferences',headers:f.headers,payload:{enabled:true,include_preview:true,categories:['owner']}})).statusCode).toBe(400);
+});
+it('administrator grouping uses only reliable account-scoped phone mappings and never labels a LID as a number',async()=>{
+ const f=await privacyFixture();await db.query("insert into organization_members values($1,$2,'owner')",[f.org,alice]);
+ for(const [jid,text] of [['923001234569@s.whatsapp.net','Phone-address message'],['987654321012345@lid','Mapped-address message'],['888888888888888@lid','Unresolved identity']])await f.inbox.save(f.account.session_id,{id:id(),jid,text});
+ await rememberPhone(f.org,f.account.id,'987654321012345@lid','923001234569');state.user=alice;
+ const r=await app.inject({url:`/organizations/${f.org}/conversations`,headers});expect(r.statusCode).toBe(200);const rows=r.json();expect(rows).toHaveLength(2);
+ const mapped=rows.find((r:any)=>r.phone==='923001234569');expect(mapped.conversation_ids).toHaveLength(2);expect(mapped.phone_verified).toBe(true);
+ const unresolved=rows.find((r:any)=>!r.phone);expect(unresolved.label).toBe('WhatsApp contact');expect(unresolved.label).not.toContain('888888888');
+ const detail=(await app.inject({url:`/organizations/${f.org}/conversations/${mapped.id}`,headers})).json();expect(detail.messages).toHaveLength(2);
+ expect((await app.inject({method:'POST',url:`/organizations/${f.org}/conversations/${mapped.id}/mode`,headers,payload:{mode:'human'}})).statusCode).toBe(200);
+ const modes=(await db.query<any>('select mode from conversations where organization_id=$1 and id=any($2::uuid[])',[f.org,mapped.conversation_ids])).rows;expect(modes.every(r=>r.mode==='human')).toBe(true);
+ const {recordOwnerMessage}=await import('../apps/api/src/owner-handover.js');
+ await app.inject({method:'POST',url:`/organizations/${f.org}/conversations/${mapped.id}/mode`,headers,payload:{mode:'active'}});
+ const sentAt=new Date(Date.now()+1000);await recordOwnerMessage(f.org,f.account.id,'987654321012345@lid',id(),sentAt,'I will take this from here.');
+ expect((await db.query<any>('select mode from conversations where organization_id=$1 and id=any($2::uuid[])',[f.org,mapped.conversation_ids])).rows.every(r=>r.mode==='human')).toBe(true);
+ await app.inject({method:'POST',url:`/organizations/${f.org}/conversations/${mapped.id}/mode`,headers,payload:{mode:'active'}});
+ await recordOwnerMessage(f.org,f.account.id,'923001234569@s.whatsapp.net',id(),new Date(sentAt.getTime()-2000),'Replayed owner history');
+ expect((await db.query<any>('select mode from conversations where organization_id=$1 and id=any($2::uuid[])',[f.org,mapped.conversation_ids])).rows.every(r=>r.mode==='active')).toBe(true);
+
+});
+it('administrator appointments reuse conflict checking and preserve contact numbers while client premium stays locked',async()=>{
+ const f=await managedFixture(false),google=mockManagedGoogle();state.user=alice;
+ try{const result=await app.inject({method:'POST',url:`/organizations/${f.org}/appointments`,headers,payload:{...f.input,contactNumber:'+923001234567'}});expect(result.statusCode).toBe(200);
+ const list=await app.inject({url:`/organizations/${f.org}/appointments`,headers});expect(list.statusCode).toBe(200);expect(list.json().appointments[0].contactNumber).toBe('+923001234567');
+ expect((await app.inject({url:'/status-api/appointments',headers:f.headers})).statusCode).toBe(403);
+ state.user=bob;expect((await app.inject({url:`/organizations/${f.org}/appointments`,headers})).statusCode).toBe(403);
+ }finally{google.restore();state.user=alice;}
+});
+
+it('owner replies reset a durable 30-minute window; new messages resume after expiry without replaying paused intake',async()=>{
+ const {recordOwnerMessage}=await import('../apps/api/src/owner-handover.js');
+ const f=await awayFixture(),jid=f.jid,at=new Date();await db.query("update whatsapp_accounts set owner_availability='away' where id=$1",[f.account.id]);
+ const seed={id:id(),jid,text:'A new project'};const store=new PgStore();const initial=(await store.load(await store.resolve(f.account.session_id),seed))!;
+ await recordOwnerMessage(f.org,f.account.id,jid,id(),new Date(at.getTime()-29*60000),'I am handling this.');
+ let row=(await db.query<any>('select * from conversations where id=$1',[initial.conversation.id])).rows[0];
+ expect(new Date(row.owner_pause_until).getTime()).toBe(at.getTime()+60000);
+ // Another reply at minute 29 restarts the full quiet window.
+ await recordOwnerMessage(f.org,f.account.id,jid,id(),at,'One more thing.');
+ row=(await db.query<any>('select * from conversations where id=$1',[initial.conversation.id])).rows[0];
+ expect(new Date(row.owner_pause_until).getTime()).toBe(at.getTime()+30*60000);
+ const paused={id:id(),jid,text:'Thanks, I have another question.',timestamp:at.getTime()+1};await f.inbox.save(f.account.session_id,paused);
+ expect((await db.query<any>('select state,owner_handled_at from whatsapp_inbox where external_id=$1',[paused.id])).rows[0]).toMatchObject({state:'done'});
+ const decide=vi.fn(async()=>({reply:'How can I help with the project?',handoff:false,actions:['REPLY'] as any})),send=vi.fn(async()=>id());
+ const pipe=new MessagePipeline(new PgStore(),{select:vi.fn(),decide});await pipe.bind(f.account.session_id,f.account.authenticated_jid,{send});
+ await pipe.receive(f.account.session_id,{id:id(),jid,text:'Please clarify',timestamp:at.getTime()+2});expect(decide).not.toHaveBeenCalled();expect(send).not.toHaveBeenCalled();
+ // Advance the persisted deadline, as after server downtime; a fresh Store uses DB state.
+ await db.query("update conversations set owner_pause_until=now()-interval '1 second',last_owner_message_at=now()-interval '30 minutes 1 second' where id=$1",[initial.conversation.id]);
+ await pipe.receive(f.account.session_id,{id:id(),jid,text:'Can we discuss the project now?',timestamp:Date.now()});expect(decide).toHaveBeenCalledTimes(1);expect(send).toHaveBeenCalledTimes(1);
+ expect((await db.query<any>('select mode from conversations where id=$1',[initial.conversation.id])).rows[0].mode).toBe('active');
+ const expired=(await db.query<any>('select owner_pause_until from conversations where id=$1',[initial.conversation.id])).rows[0].owner_pause_until;
+ await pipe.receive(f.account.session_id,{id:id(),jid,text:'Delayed message from the quiet window',timestamp:new Date(expired).getTime()-1});expect(send).toHaveBeenCalledTimes(1);
+ const other=(await new PgStore().load(await store.resolve(f.account.session_id),{id:id(),jid:id()+'@lid',text:'Independent chat'}))!;expect(other.conversation.mode).toBe('active');
+ await recordOwnerMessage(f.org,f.account.id,jid,id(),new Date(),'Back in the chat.');
+ expect((await db.query<any>('select mode,owner_pause_until from conversations where id=$1',[initial.conversation.id])).rows[0].mode).toBe('human');
+
+ // Explicit manual takeover has no automatic deadline.
+ const {setConversationMode}=await import('../apps/api/src/attention-routes.js');const adapter={query:async(...args:any[])=>{const r=await (db.query as any)(...args);return {...r,rowCount:r.affectedRows??r.rows.length}}};
+ await setConversationMode(adapter,f.org,initial.conversation.id,'human');
+ await pipe.receive(f.account.session_id,{id:id(),jid,text:'Still with the owner?',timestamp:Date.now()+31*60000});expect(send).toHaveBeenCalledTimes(1);
+ expect((await db.query<any>('select owner_pause_until from conversations where id=$1',[initial.conversation.id])).rows[0].owner_pause_until).toBeNull();
+});
+
+it('admin composer starts the same quiet window and idempotent send retries do not extend or resend it',async()=>{
+ const f=await awayFixture();await db.query("insert into organization_members values($1,$2,'owner')",[f.org,alice]);state.user=alice;
+ const store=new PgStore(),c=(await store.load(await store.resolve(f.account.session_id),{id:id(),jid:f.jid,text:'Hello'}))!;
+ const sendStaff=vi.fn(async()=>{}),local=await buildServer({ready:true,state:()=> 'connected',sendStaff,close:async()=>{}} as any,{pushWorker:false});
+ try{
+  const requestId=id(),url=`/organizations/${f.org}/conversations/${c.conversation.id}/send`;
+  const result=await local.inject({method:'POST',url,headers,payload:{text:'Let me take care of this.',requestId}});expect(result.statusCode).toBe(200);expect(result.json().status).toBe('sent');
+  const row=(await db.query<any>('select mode,last_owner_message_at,owner_pause_until from conversations where id=$1',[c.conversation.id])).rows[0];expect(row.mode).toBe('human');
+  expect(new Date(row.owner_pause_until).getTime()-new Date(row.last_owner_message_at).getTime()).toBe(30*60000);
+  await local.inject({method:'POST',url,headers,payload:{text:'Let me take care of this.',requestId}});expect(sendStaff).toHaveBeenCalledTimes(1);
+  expect((await db.query<any>('select owner_pause_until from conversations where id=$1',[c.conversation.id])).rows[0].owner_pause_until).toEqual(row.owner_pause_until);
+ }finally{await local.close()}
 });

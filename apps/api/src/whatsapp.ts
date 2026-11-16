@@ -147,6 +147,10 @@ export class WhatsAppManager {
       }).catch(() => {});
     };
     this.ownerSignals(l,socket,enqueue);
+    socket.ev.on('contacts.upsert',contacts=>enqueue(async()=>{for(const contact of contacts){
+      const name=(contact.name||contact.notify||contact.verifiedName||'').trim().slice(0,120);
+      if(name&&/^.+@(s\.whatsapp\.net|lid)$/.test(contact.id))await pool.query('update contacts set display_name=coalesce(display_name,$3) where organization_id=$1 and identity=$2',[l.org,contact.id,name]);
+    }},false));
     socket.ev.on("creds.update", () => enqueue(auth.save));
     socket.ev.on("connection.update", update => enqueue(async () => {
       if (update.qr) { l.qr = await QRCode.toDataURL(update.qr); l.qrUntil = Date.now() + 55000; }
@@ -154,7 +158,7 @@ export class WhatsAppManager {
         await auth.save(); await auth.flush();
         const jid = jidNormalizedUser(socket.user?.id || "");
         if (!jid) throw new Error("Missing authenticated identity");
-        const result = await pool.query("update whatsapp_accounts set authenticated_jid=$4,status='connected' where organization_id=$1 and id=$2 and session_id=$3 and (authenticated_jid is null or authenticated_jid=$4) returning id", [l.org, l.account, l.session, jid]);
+        const result = await pool.query("update whatsapp_accounts set authenticated_jid=$4,status='connected',last_connected_at=now() where organization_id=$1 and id=$2 and session_id=$3 and (authenticated_jid is null or authenticated_jid=$4) returning id", [l.org, l.account, l.session, jid]);
         if (result.rowCount !== 1) throw new Error("Identity mismatch");
         await this.pipeline.bind(l.session, jid, { send: async (target, text) => {
           if (l.stopped || l.socket !== socket) throw new Error("Stale connection");
