@@ -10,8 +10,8 @@ export const basicReplies = {
   services: "I don't have the confirmed service details yet. What are you interested in?",
   hours: "I don't have confirmed opening hours or location details yet. What would you like to know?",
   medical: "I can't assess symptoms or recommend a treatment. Please discuss medical questions with a qualified clinician.",
-  other: "Thanks for your message! Could you tell me a little more about what you need help with?",
-  unavailable: "Thanks for your message. I'm having a temporary connection issue. Please try again shortly.",
+  other: "",
+  unavailable: "",
 };
 export type BasicIntent = keyof typeof basicReplies;
 export function localIntent(text: string): BasicIntent {

@@ -92,6 +92,7 @@ beforeAll(async () => {
   await db.exec(readFileSync("supabase/migrations/202611160003_attention_push.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611170001_product_controls.sql", "utf8"));
   await db.exec(readFileSync("supabase/migrations/202611170002_owner_pause_window.sql", "utf8"));
+  await db.exec(readFileSync("supabase/migrations/202611170003_agent_workspace.sql", "utf8"));
   await db.query("insert into auth.users values($1),($2)", [alice, bob]);
   await db.query(
     "insert into organizations(id,name) values($1,'Revive'),($2,'Zorro')",
@@ -352,7 +353,7 @@ it("records the actual outgoing provider ID and state after a verified send", as
 it("a connected account replies repeatedly with no knowledge setup or publication", async () => {
   const account = (await db.query<any>("insert into whatsapp_accounts(organization_id,authenticated_jid,status) values($1,$2,'connected') returning *", [b, `${id()}@s.whatsapp.net`])).rows[0];
   const send = vi.fn(async () => id());
-  const pipeline = new MessagePipeline(new PgStore(), { select: async () => null });
+  const pipeline = new MessagePipeline(new PgStore(), { select: async () => null,decide:async()=>({reply:'I can help with that question.',handoff:false,actions:['REPLY']}) });
   await pipeline.bind(account.session_id, account.authenticated_jid, { send });
   for (const text of ["Hello", "What are your prices?"]) await pipeline.receive(account.session_id, { id: id(), text, jid: "new-customer@lid" });
   expect(send).toHaveBeenCalledTimes(2);
@@ -575,10 +576,10 @@ it('history is scoped before limiting and excludes the current batch, future que
 });
 it('handoff sends one final notice, persists human mode and suppresses subsequent AI replies',async()=>{
  const org=id();await db.query("insert into organizations(id,name) values($1,'Handoff regression')",[org]);const account=(await db.query<any>("insert into whatsapp_accounts(organization_id,authenticated_jid,status) values($1,$2,'connected') returning *",[org,id()+'@s.whatsapp.net'])).rows[0];
- const send=vi.fn(async(_jid:string,_text:string)=>id()),respond=vi.fn(async()=> 'This should not be used'),pipeline=new MessagePipeline(new PgStore(),{select:vi.fn(),respond});await pipeline.bind(account.session_id,account.authenticated_jid,{send});
- const jid=id()+'@lid';await pipeline.receive(account.session_id,{id:id(),jid,text:'Please connect me to a human'});expect(send).toHaveBeenCalledTimes(1);expect(send.mock.calls[0][1]).toBe('Our team will handle this chat from here and reply when available.');
+ const send=vi.fn(async(_jid:string,_text:string)=>id()),respond=vi.fn(async()=>({reply:'I will let the owner know.',handoff:true,actions:['REPLY','HANDOVER','NOTIFY_OWNER'] as any})),pipeline=new MessagePipeline(new PgStore(),{select:vi.fn(),decide:respond});await pipeline.bind(account.session_id,account.authenticated_jid,{send});
+ const jid=id()+'@lid';await pipeline.receive(account.session_id,{id:id(),jid,text:'Please connect me to a human'});expect(send).toHaveBeenCalledTimes(1);expect(send.mock.calls[0][1]).toBe('I will let the owner know.');
  const chat=(await db.query<any>('select * from conversations where organization_id=$1',[org])).rows[0];expect(chat.mode).toBe('human');expect((await db.query<any>('select customer_jid,account_id from handoff_unread_requests where conversation_id=$1',[chat.id])).rows[0]).toEqual({customer_jid:jid,account_id:account.id});
- await pipeline.receive(account.session_id,{id:id(),jid,text:'What about tomorrow?'});expect(send).toHaveBeenCalledTimes(1);expect(respond).not.toHaveBeenCalled();expect((await db.query<any>("select count(*)::int n from audit_logs where organization_id=$1 and event='ai_staff_handoff'",[org])).rows[0].n).toBe(1);
+ await pipeline.receive(account.session_id,{id:id(),jid,text:'What about tomorrow?'});expect(send).toHaveBeenCalledTimes(1);expect(respond).toHaveBeenCalledTimes(1);expect((await db.query<any>("select count(*)::int n from audit_logs where organization_id=$1 and event='ai_staff_handoff'",[org])).rows[0].n).toBe(1);
 });
 it('phone reads and replies preserve the selected reply mode and only exclude handled messages',async()=>{
  const f=await awayFixture();await db.query("update whatsapp_accounts set owner_availability='away',owner_status_at='2026-01-01T00:00:00Z' where id=$1",[f.account.id]);
@@ -988,4 +989,40 @@ it('admin composer starts the same quiet window and idempotent send retries do n
   await local.inject({method:'POST',url,headers,payload:{text:'Let me take care of this.',requestId}});expect(sendStaff).toHaveBeenCalledTimes(1);
   expect((await db.query<any>('select owner_pause_until from conversations where id=$1',[c.conversation.id])).rows[0].owner_pause_until).toEqual(row.owner_pause_until);
  }finally{await local.close()}
+});
+
+it('agent documents migrate legacy data, autosave with conflict protection and restore without losing versions',async()=>{
+ const org=id();await db.query("insert into organizations(id,name) values($1,'Independent owner')",[org]);await db.query("insert into organization_members values($1,$2,'owner')",[org,alice]);state.user=alice;
+ const legacy={...config,businessName:'Independent owner',instructions:'Original personal style and owner details',description:'Original business facts'};
+ const migratedDraft=await app.inject({method:'POST',url:`/organizations/${org}/knowledge`,headers,payload:legacy});await app.inject({method:'POST',url:`/organizations/${org}/publish`,headers,payload:{revisionId:migratedDraft.json().id}});
+ const base=`/organizations/${org}/agent`,initial=await app.inject({url:base,headers});expect(initial.statusCode).toBe(200);const docs=initial.json().documents;expect(docs).toHaveLength(6);
+ const soul=docs.find((d:any)=>d.name==='SOUL.md');expect(soul.content).toContain(legacy.instructions);expect(docs.find((d:any)=>d.name==='KNOWLEDGE.md').content).toContain(legacy.description);
+ const updated=await app.inject({method:'PUT',url:base+'/documents/SOUL.md',headers,payload:{version:soul.version,content:'# New personality\nRespectful and direct.',enabled:true,max_tokens:800}});expect(updated.statusCode).toBe(200);expect(updated.json().version).toBe(2);
+ expect((await app.inject({method:'PUT',url:base+'/documents/SOUL.md',headers,payload:{version:1,content:'Stale overwrite',enabled:true,max_tokens:800}})).statusCode).toBe(409);
+ const history=(await app.inject({url:base+'/documents/SOUL.md/versions',headers})).json().versions;expect(history.some((v:any)=>v.content.includes(legacy.instructions))).toBe(true);
+ const restored=await app.inject({method:'POST',url:base+'/documents/SOUL.md/restore',headers,payload:{version:2,restoreVersion:1}});expect(restored.statusCode).toBe(200);expect(restored.json().version).toBe(3);expect(restored.json().content).toContain(legacy.instructions);
+ expect((await app.inject({method:'PUT',url:base+'/documents/IDENTITY.md',headers,payload:{version:1,content:'Essential identity',enabled:false,max_tokens:800}})).statusCode).toBe(400);
+ state.user=bob;expect((await app.inject({url:base,headers})).statusCode).toBe(403);state.user=alice;
+ expect((await app.inject({url:base,headers:{authorization:'Bearer portal-cookie-is-not-an-admin'}})).statusCode).toBe(403);
+});
+it('playground runs real structured decisions but never writes live messages, notifications or appointments',async()=>{
+ state.user=alice;const originalKey=process.env.DEEPSEEK_API_KEY;process.env.DEEPSEEK_API_KEY='synthetic-test-key';const originalFetch=global.fetch;
+ const counts=async()=>Promise.all(['messages','appointment_requests','attention_events','push_deliveries'].map(async t=>Number((await db.query<any>(`select count(*) as count from ${t} where organization_id=$1`,[a])).rows[0].count)));
+ const before=await counts();
+ try{
+  global.fetch=vi.fn(async()=>({ok:true,json:async()=>({choices:[{message:{content:JSON.stringify({actions:['IGNORE'],reply:'',category:null,reason:null})}}],usage:{prompt_tokens:300,completion_tokens:15,total_tokens:315}})}) as any);
+  const result=await app.inject({method:'POST',url:`/organizations/${a}/agent/playground`,headers,payload:{message:'🙄🙄🙄',history:[]}});expect(result.statusCode).toBe(200);expect(result.json().reply).toBe('');expect(result.json().actions).toEqual(['IGNORE']);expect(result.json().diagnostics.sideEffects).toBe('disabled');expect(result.json().diagnostics.usage.inputTokens).toBe(300);
+  global.fetch=vi.fn(async()=>({ok:true,json:async()=>({choices:[{message:{content:JSON.stringify({actions:['REPLY','HANDOVER','NOTIFY_OWNER'],reply:'I will let the owner know.',category:'owner',reason:'Owner requested'})}}]})}) as any);
+  const handover=await app.inject({method:'POST',url:`/organizations/${a}/agent/playground`,headers,payload:{message:'Please call the owner',history:[{sender:'customer',content:'I need help'}]}});expect(handover.statusCode).toBe(200);expect(handover.json().handoff).toBe(true);expect(await counts()).toEqual(before);
+  const f=await privacyFixture();expect((await app.inject({method:'POST',url:'/status-api/agent/playground',headers:f.headers,payload:{message:'Secret'}})).statusCode).toBe(404);
+ }finally{global.fetch=originalFetch;if(originalKey===undefined)delete process.env.DEEPSEEK_API_KEY;else process.env.DEEPSEEK_API_KEY=originalKey;}
+});
+
+it('saving an agent document invalidates an already generated live reply',async()=>{
+ const f=await awayFixture();await db.query("update whatsapp_accounts set owner_availability='away' where id=$1",[f.account.id]);await db.query("insert into organization_members values($1,$2,'owner')",[f.org,alice]);state.user=alice;
+ const event={id:id(),jid:f.jid,text:'How much is a website?'},store=new PgStore(),c=(await store.load(await store.resolve(f.account.session_id),event))!;await store.claim(c,event);
+ const doc=c.agent!.documents.find(d=>d.name==='KNOWLEDGE.md')!;
+ const saved=await app.inject({method:'PUT',url:`/organizations/${f.org}/agent/documents/KNOWLEDGE.md`,headers,payload:{version:doc.version,content:'# New approved prices',enabled:true,max_tokens:1200}});expect(saved.statusCode).toBe(200);
+ const send=vi.fn(async()=>id());await store.finalize(c,event,'Old price generated before edit',send);expect(send).not.toHaveBeenCalled();
+ const next=(await new PgStore().load(await store.resolve(f.account.session_id),{...event,id:id()}))!;expect(next.agent!.documents.find(d=>d.name==='KNOWLEDGE.md')!.content).toBe('# New approved prices');
 });

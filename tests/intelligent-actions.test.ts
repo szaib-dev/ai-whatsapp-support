@@ -16,7 +16,7 @@ it('does not suppress meaningful emoji or sarcasm through keyword/emoji rules',a
  const c={...context,history:[{organization_id:'workspace',conversation_id:'chat',sender:'customer',content:'The payment link is broken',ai_context_source:'user'}]};
  const decide=vi.fn(async()=>structuredDecision({actions:['REPLY','NOTIFY_OWNER'],reply:'I’ll ask the team to check the payment link.',reason:'Payment issue',category:'handover'}));
  expect((await automaticResponse(c,'Great, still broken 🙄',{select:vi.fn(),decide})).reply).toContain('payment');
- const prompt=conversationPrompt(c,'Great, still broken 🙄');expect(prompt[0].content).toContain('Punjabi');expect(prompt[0].content).toContain('contact');expect(prompt[1].content).toContain('payment link');
+ const prompt=conversationPrompt(c,'Great, still broken 🙄');expect(prompt[0].content).toContain('Punjabi');expect(prompt[0].content.toLowerCase()).toContain('contact');expect(prompt[1].content).toContain('payment link');
 });
 it('rejects contradictory or malformed model actions',()=>{
  for(const value of [{actions:['REPLY'],reply:''},{actions:['IGNORE'],reply:'Bye!'},{actions:['REPLY','IGNORE'],reply:'Hi'},{actions:['REPLY','REPLY'],reply:'Hi'},{actions:['SEND_MONEY']}])expect(()=>structuredDecision(value)).toThrow();

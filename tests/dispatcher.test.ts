@@ -15,10 +15,10 @@ it('limits work to four customers and keeps a busy customer excluded',async()=>{
 it('flags uncertain delivery and never automatically repeats it',async()=>{
  let pending:InboxBatch|null=batch('a',['hello']);const finish=vi.fn(async()=>{}),deliver=vi.fn(async()=>{throw Error('unknown send result')});const d=new Dispatcher({take:async()=>{const b=pending;pending=null;return b},finish},deliver);await d.tick();await d.close();expect(finish).toHaveBeenCalledWith(expect.any(Array),'uncertain');expect(deliver).toHaveBeenCalledTimes(1);
 });
-import {automaticAnswer,businessHours,conversationPrompt,localizedFallback,DeepSeek,type Context} from '../apps/api/src/ai.js';
+import {automaticAnswer,businessHours,conversationPrompt,replyLanguage,DeepSeek,type Context} from '../apps/api/src/ai.js';
 it('recalls a name from recent customer history before selecting an unrelated approved answer',async()=>{
  const ai=new DeepSeek();ai.select=vi.fn(async()=>{throw Error('Name recall should not use fact selection')});const c={memories:[],history:[{sender:'customer',content:'My name is Shahzaib'}],revision:{content:{languages:['English'],facts:[{id:'identity',answer:'I am an assistant'}]}}} as unknown as Context;
- expect(await automaticAnswer(c,'What was my name?',ai)).toContain('Shahzaib');expect(ai.select).not.toHaveBeenCalled();
+ ai.decide=vi.fn(async()=>({reply:'Your name is Shahzaib.',handoff:false,actions:['REPLY'] as ['REPLY']}));expect(await automaticAnswer(c,'What was my name?',ai)).toContain('Shahzaib');expect(ai.select).not.toHaveBeenCalled();
 });
 
 it('uses explicit opening and closing times from the business description',async()=>{
@@ -32,8 +32,8 @@ it('uses explicit opening and closing times from the business description',async
 it('puts the owner rules, selected language and combined chunks in the conversational prompt',()=>{
  const c={revision:{content:{businessName:'Revive',languages:['Roman Urdu'],description:'Open 11:30 am to 5:30 pm',instructions:'Reply in Roman Urdu. If the customer is rude stay calm.',facts:[],tone:'warm'}},history:[],memories:[]} as unknown as Context;
  const messages=conversationPrompt(c,'Ok\nGotcha\nMan');expect(messages[0].content).toContain('Roman Urdu');expect(messages[0].content).toContain('stay calm');expect(messages[1].content).toContain('Gotcha');
- expect(localizedFallback(c,'Ok Gotcha Man')).toBe('Theek hai! Zaroorat ho to bata dein.');
- expect(localizedFallback(c,'Hi')).toContain('Aap ki');
+ expect(replyLanguage(c,'Ok Gotcha Man')).toBe('English');
+ expect(replyLanguage(c,'Hi')).toBe('English');
 });
 it('uses the generated reply instead of the old English templates',async()=>{
  const c={revision:{content:{languages:['Roman Urdu'],facts:[]}},history:[],memories:[]} as unknown as Context;
@@ -48,6 +48,6 @@ it('does not infer today availability from opening hours alone',async()=>{
 it('written language and tone rules override removed legacy preferences',async()=>{
  const c={revision:{content:{businessName:'Revive',languages:['Roman Urdu'],tone:'warm',instructions:'Reply in English. Use a professional tone.',description:'',facts:[]}},history:[],memories:[]} as unknown as Context;
  const content=conversationPrompt(c,'Hi')[0].content;expect(content).toContain('Reply in English');expect(content).not.toContain('Respond in Roman Urdu');expect(content).not.toContain('"tone":"warm"');
- expect(localizedFallback(c,'Hi')).toBe('Hello! How can I help you today?');
- c.revision.content.instructions='Always reply in Roman Urdu. Keep the tone friendly.';c.revision.content.languages=['English'];expect(localizedFallback(c,'Hi')).toContain('Aap ki');
+ expect(replyLanguage(c,'Hi')).toBe('English');
+ c.revision.content.instructions='Always reply in Roman Urdu. Keep the tone friendly.';c.revision.content.languages=['English'];expect(replyLanguage(c,'Hi')).toBe('English');
 });

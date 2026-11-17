@@ -1,3 +1,4 @@
+import {loadAgentConfiguration} from './agent-config.js';
 import {refreshOwnerPause} from './owner-handover.js';
 import {equivalentConversations} from './contact-identity.js';
 import {withChatPrivacy} from './chat-privacy.js';
@@ -65,14 +66,15 @@ export class PgStore implements Store {
         [org, contact.id],
       )
     ).rows;
+    const historyIds=await equivalentConversations(pool,org,conversation.id);
     const history = (
       await pool.query(
-        `select m.* from messages m where m.organization_id=$1 and m.conversation_id=$2
+        `select m.* from messages m where m.organization_id=$1 and m.conversation_id=any($2::uuid[])
           and m.created_at>=now()-interval '30 days' and not (m.external_id=any($3::text[]))
-          and m.created_at<=(select max(created_at) from messages where organization_id=$1 and conversation_id=$2 and external_id=any($3::text[]))
+          and m.created_at<=(select max(created_at) from messages where organization_id=$1 and conversation_id=any($2::uuid[]) and external_id=any($3::text[]))
           and (m.sender='customer' or m.status='sent')
           order by m.created_at desc,m.id desc limit 60`,
-        [org, conversation.id, parts.map(p=>p.id)],
+        [org, historyIds, parts.map(p=>p.id)],
       )
     ).rows.reverse();
     return {
@@ -81,10 +83,11 @@ export class PgStore implements Store {
       contact,
       conversation,
       revision,
+      agent:await loadAgentConfiguration(pool,org,revision.content),
       memories,
       // History may span the customer's accounts; expose only this conversation
       // to the validator until explicit cross-account history is supported.
-      history: history.filter(m=>m.conversation_id===conversation.id),
+      history: history.map(m=>({...m,conversation_id:conversation.id})),
     };
   }
   async claim(c: Context, e: Incoming) {
@@ -150,7 +153,8 @@ export class PgStore implements Store {
       const handled=(await db.query('select 1 from whatsapp_inbox where organization_id=$1 and account_id=$2 and external_id=any($3::text[]) and owner_handled_at is not null limit 1',[c.organization_id,c.account.id,(e.parts||[e]).map(p=>p.id)])).rows[0];
       if(handled || (policy?.reply_only_when_away && account.owner_availability!=='away'))throw new OwnerDeferred('Owner is active, status unknown, or messages were handled');
       const newer=(await db.query("select 1 from whatsapp_inbox where organization_id=$1 and account_id=$2 and customer_jid=$3 and state='pending' limit 1",[c.organization_id,c.account.id,c.contact.identity])).rows.length>0;
-      const eligible=!newer && !contact.ai_opt_out && contact.assistant_behavior!=='ignore'
+      const agentRevision=c.agent?(await db.query('select revision from agent_settings where organization_id=$1 for share',[c.organization_id])).rows[0]?.revision:null;
+      const eligible=(!c.agent||agentRevision===c.agent.settings.revision) && !newer && !contact.ai_opt_out && contact.assistant_behavior!=='ignore'
         && conversation.assistant_version===(c.conversation.assistant_version??0)
         && (pub?.revision_id || DEFAULT_REVISION_ID)===c.revision.id;
       // Pause and enqueue attention independently of whether an acknowledgement is sent.

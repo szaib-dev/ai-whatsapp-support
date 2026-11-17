@@ -1,7 +1,6 @@
-import {explicitHandoff} from './conversation.js';
+import {processAssistantTurn} from './conversation-engine.js';
 import type {AppointmentHandler} from "./appointments.js";
 import {
-  automaticResponse,
   validateContext,
   TenantMismatch,
   type Context,
@@ -102,39 +101,9 @@ export class MessagePipeline {
         if (!c) return;
         validateContext(c, session);
         if (!(await this.store.claim(c, event))) return;
-        let answer: string | null = null;
-        let handoff=false,calendar=false,notify=false,reason="",category="handover";
-        if (
-          c.conversation.mode === "active" &&
-          !c.contact.ai_opt_out &&
-          c.revision.content.aiEnabled
-        ) {
-          try {
-            const behavior=c.contact.assistant_behavior||'normal';
-            if(behavior==='ignore') { /* Intentional silence: no model or calendar access. */ }
-            else if(behavior==='human'){handoff=true;notify=true;reason='Contact requires human assistance';}
-            else {
-            const contextual=!!this.ai.decide&&!/^(?:confirm|cancel)\b/i.test(event.text.trim());
-            if(!contextual){answer=explicitHandoff(event.text)?null:await this.appointments?.reply(c,event.text,event.id)??null;calendar=answer!==null;}
-            if(answer===null){
-              const decision=await automaticResponse(c,event.text,this.ai);
-              answer=decision.reply||null;handoff=decision.handoff;
-              notify=!!decision.actions?.includes('NOTIFY_OWNER')||handoff;
-              reason=decision.reason||'';category=decision.category||'handover';
-              if(contextual&&!handoff&&(!decision.actions||decision.actions.includes('REPLY'))){
-                const booking=await this.appointments?.reply(c,event.text,event.id)??null;
-                if(booking!==null){answer=booking;calendar=true;}
-              }
-            }
-            if(behavior==='notify'){notify=true;reason=reason||'Priority contact sent a message';category='owner';}
-            }
-          } catch {
-            answer = null;
-          }
-        }
-        if(c.conversation.mode==='human'&&!c.contact.ai_opt_out&&c.contact.assistant_behavior!=='ignore'){
-          notify=true;reason='New message in a conversation awaiting your team';
-        }
+        const decision=await processAssistantTurn(c,event.text,this.ai,{appointments:this.appointments,eventId:event.id});
+        const answer=decision.actions?.includes('REPLY')?decision.reply:null;
+        const handoff=decision.handoff,notify=!!decision.actions?.includes('NOTIFY_OWNER'),calendar=!!decision.calendar,reason=decision.reason||'',category=decision.category||'handover';
         finalized = true;
         await this.store.finalize(c, event, answer, async () => {
           if (this.sockets.get(session) !== socket)

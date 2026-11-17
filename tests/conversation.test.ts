@@ -39,18 +39,18 @@ it('repeated model replies are regenerated against the latest message',async()=>
  const c=context(history);const decide=vi.fn().mockResolvedValueOnce({reply:'What time would you prefer?',handoff:false}).mockResolvedValueOnce({reply:'We are at 20 Main Street.',handoff:false});
  expect(await automaticResponse(c,'Where is your clinic?',{select:vi.fn(),decide})).toEqual({reply:'We are at 20 Main Street.',handoff:false});expect(decide).toHaveBeenCalledTimes(2);expect(decide.mock.calls[1][2]).toBe('What time would you prefer?');
 });
-it('persistent repetition yields a final staff notice instead of an unrelated repeated question',async()=>{
- const c=context(history),decide=vi.fn(async()=>({reply:'What time would you prefer?',handoff:false}));const result=await automaticResponse(c,'Where is your clinic?',{select:vi.fn(),decide});expect(result.handoff).toBe(true);expect(result.reply).toContain('team');expect(result.reply).not.toContain('What time');
+it('persistent repetition stays silent and requests review without a generic staff notice',async()=>{
+ const c=context(history),decide=vi.fn(async()=>({reply:'What time would you prefer?',handoff:false}));const result=await automaticResponse(c,'Where is your clinic?',{select:vi.fn(),decide});expect(result.handoff).toBe(false);expect(result.reply).toBe('');expect(result.actions).toContain('NOTIFY_OWNER');
 });
 it('current topic, customer memory and clinic-specific rules all reach generation',()=>{
  const c=context(history);c.revision.content.instructions='Do not promise outcomes. Our address is 20 Main Street.';c.memories=[{organization_id:c.organization_id,contact_id:c.contact.id,content:'Customer name is Ali',kind:'preferred_name',ai_context_source:'user'}];
  const p=conversationPrompt(c,'Where is the clinic?');expect(p[0].content).toContain(c.revision.content.instructions);const data=JSON.parse(p[1].content);expect(data.currentMessageChunks).toBe('Where is the clinic?');expect(data.customerMemory).toContain('Customer name is Ali');expect(data.recentMessages).toHaveLength(2);
 });
 it.each([['Please let me speak to a human','English'],['Mujhe staff se baat karni hai','Roman Urdu'],['عملے سے بات کرنی ہے','Urdu']])('staff requests receive a final localized handoff notice: %s',async(text,language)=>{
- const decide=vi.fn();const result=await automaticResponse(context(history),text,{select:vi.fn(),decide});expect(result.handoff).toBe(true);expect(replyLanguage(context(),text)).toBe(language);expect(decide).toHaveBeenCalledTimes(1);expect(result.reply).not.toContain('—');
+ const decide=vi.fn();const result=await automaticResponse(context(history),text,{select:vi.fn(),decide});expect(result.reply).toBe('');expect(result.actions).toContain('NOTIFY_OWNER');expect(replyLanguage(context(),text)).toBe(language);expect(decide).toHaveBeenCalledTimes(1);expect(result.reply).not.toContain('—');
 });
-it('owner-requested handoffs use the same server-controlled notice',async()=>{
- const result=await automaticResponse(context(),'I need help with this complaint',{select:vi.fn(),decide:vi.fn(async()=>({reply:'I transferred you instantly!',handoff:true}))});expect(result).toEqual({reply:'Our team will handle this chat from here and reply when available.',handoff:true});
+it('handover acknowledgements retain the configured response without template replacement',async()=>{
+ const result=await automaticResponse(context(),'I need help with this complaint',{select:vi.fn(),decide:vi.fn(async()=>({reply:'I will let the owner know.',handoff:true}))});expect(result).toEqual({reply:'I will let the owner know.',handoff:true});
 });
 it('removes stale booking follow-up questions appended to an otherwise relevant answer',async()=>{
  const decide=vi.fn(async()=>({reply:'Our clinic is at 22 Maple Street. Would you still like to book tomorrow, and at what time?',handoff:false}));

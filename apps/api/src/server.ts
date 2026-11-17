@@ -1,3 +1,4 @@
+import {registerAgentRoutes,AgentConflict} from './agent-routes.js';
 import "dotenv/config";
 import {conversationIdentities,groupConversations,equivalentConversations} from './contact-identity.js';
 import {PushWorker} from './notifications.js';
@@ -39,7 +40,7 @@ export async function buildServer(whatsapp?: WhatsAppManager,options:{pushWorker
   });
   app.setErrorHandler((error, _req, reply) => {
     const status =
-      (error as any)?.statusCode===429 ? 429 :
+      error instanceof AgentConflict ? 409 : (error as any)?.statusCode===429 ? 429 :
       error instanceof Forbidden
         ? 403
         : error instanceof Unavailable
@@ -59,7 +60,7 @@ export async function buildServer(whatsapp?: WhatsAppManager,options:{pushWorker
           issues: error.issues.map(issue => ({ path: issue.path.join("."), message: issue.message })),
         } : {}),
         error:
-          status === 429 ? "Too many requests" : status === 403
+          status === 409 ? (error as Error).message : status === 429 ? "Too many requests" : status === 403
             ? "Forbidden"
             : status === 400
               ? "Invalid input"
@@ -139,6 +140,7 @@ export async function buildServer(whatsapp?: WhatsAppManager,options:{pushWorker
     const heartbeat=setInterval(()=>{void allowed().then(r=>{if(!r.rowCount)reply.raw.end();else reply.raw.write(': heartbeat\n\n')}).catch(()=>reply.raw.end())},25000);heartbeat.unref();
     const close=()=>{streams.delete(reply.raw);clearInterval(heartbeat);unsubscribe()};reply.raw.on('close',close);
   });
+  registerAgentRoutes(app,tenant);
   app.get("/health", async () => ({ status: "ok" }));
   app.get("/organizations/:org/whatsapp", req => tenant(req, true, async (db, org) => {
     const accounts = (await db.query("select id,status,authenticated_jid,owner_availability,owner_status_at,last_connected_at,last_connection_error,needs_pairing from whatsapp_accounts where organization_id=$1 and removed_at is null order by id", [org])).rows;

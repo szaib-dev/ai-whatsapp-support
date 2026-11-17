@@ -70,5 +70,9 @@
   "202611170002_owner_pause_window.sql": {
     "sha256": "d1a2aa2eaa22a6264b1dd7c22334b3634914e1e477e82d0b00b33c6dd14f9510",
     "backwardCompatible": true
+  },
+  "202611170003_agent_workspace.sql": {
+    "sha256": "a53754946eb9eb959f73bd40e56e3b0437cb43d52dc89e0e988d0b8956a9f55a",
+    "backwardCompatible": true
   }
 }
