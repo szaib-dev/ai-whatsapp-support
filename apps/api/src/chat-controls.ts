@@ -8,7 +8,7 @@ type Session={organization_id:string;tokenHash:string};
 export function registerChatControls(app:FastifyInstance,sessionFor:(req:any)=>Promise<Session>,csrf:(req:any)=>void){
  app.get('/status-api/chat-assistant',async req=>{
   const session=await sessionFor(req);
-  const {search='',offset,filter}=z.object({search:z.string().trim().max(100).optional(),offset:z.coerce.number().int().min(0).max(100000).default(0),filter:z.enum(['all','human','timed','stopped']).default('all')}).strict().parse(req.query);
+  const {search='',offset,filter}=z.object({search:z.string().trim().max(100).optional(),offset:z.coerce.number().int().min(0).max(100000).default(0),filter:z.enum(['all','attention','human','timed','stopped']).default('all')}).strict().parse(req.query);
   // Only control metadata leaves this endpoint: never messages, previews,
   // instructions, handoff reasons, raw LIDs or internal account IDs.
   const rows=(await pool.query(`with mapped as (
@@ -27,7 +27,7 @@ export function registerChatControls(app:FastifyInstance,sessionFor:(req:any)=>P
     max(owner_pause_until) filter(where mode='human' and owner_pause_until>now()) as pause_until
    from mapped group by account_id,coalesce(phone,id::text)
   ) select * from grouped where ($2='' or coalesce(name,'') ilike $2 or coalesce(phone,'') like $2)
-   and ($4='all' or state=$4) order by (state='active'),coalesce(name,phone,''),id limit 31 offset $3`,[session.organization_id,search?'%'+search.replace(/[\\%_]/g,'\\$&')+'%':'',offset,filter])).rows;
+   and ($4='all' or state=$4 or ($4='attention' and state<>'active')) order by (state='active'),coalesce(name,phone,''),id limit 31 offset $3`,[session.organization_id,search?'%'+search.replace(/[\\%_]/g,'\\$&')+'%':'',offset,filter])).rows;
   return {chats:rows.slice(0,30),hasMore:rows.length>30};
  });
  app.post('/status-api/chat-assistant/:id/resume',async req=>{

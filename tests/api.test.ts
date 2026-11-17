@@ -1116,6 +1116,7 @@ it('portal assistant controls show safe states, scoped aliases and expiry withou
  const resumed=await app.inject({method:'POST',url:`/status-api/chat-assistant/${c.conversation.id}/resume`,headers:f.headers,payload:{}});expect(resumed.statusCode).toBe(200);
  expect((await db.query<any>('select mode,owner_pause_until from conversations where organization_id=$1',[f.org])).rows.every(r=>r.mode==='active'&&r.owner_pause_until===null)).toBe(true);
  expect((await app.inject({url:'/status-api/chat-assistant',headers:f.headers})).json().chats[0].state).toBe('active');
+ expect((await app.inject({url:'/status-api/chat-assistant?filter=attention',headers:f.headers})).json().chats).toHaveLength(0);
  await stopPhone(f,phone);
  expect((await app.inject({url:'/status-api/chat-assistant?filter=stopped',headers:f.headers})).json().chats[0].privacy_stopped).toBe(true);
  expect((await app.inject({method:'POST',url:`/status-api/chat-assistant/${c.conversation.id}/resume`,headers:f.headers,payload:{}})).statusCode).toBe(400);
