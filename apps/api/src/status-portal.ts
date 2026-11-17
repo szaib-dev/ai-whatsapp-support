@@ -1,3 +1,4 @@
+import {WorkspaceChanges} from './live-updates.js';
 import {registerAttentionRoutes} from './attention-routes.js';
 import {registerAppointmentManagement,featureEnabled} from './appointment-management.js';
 import {registerChatControls} from './chat-controls.js';
@@ -19,6 +20,17 @@ function csrf(req:any){if(req.headers.origin!==(process.env.WEB_ORIGIN||'http://
 async function portalSession(req:any){const token=req.headers.cookie?.match(/(?:^|;\s*)clinic_status=([a-f\d]{64})/)?.[1];if(!token)throw new Forbidden();const row=(await pool.query('select s.organization_id,o.name from status_portal_sessions s join status_portal_logins l on l.organization_id=s.organization_id join organizations o on o.id=s.organization_id where s.token_hash=$1 and s.expires_at>now() and l.enabled',[digest(token)])).rows[0];if(!row)throw new Forbidden();return {...row,tokenHash:digest(token)}}
 type Tenant=(req:any,owner:boolean,fn:(db:any,org:string,actor:string)=>Promise<unknown>)=>Promise<unknown>;
 export function registerStatusPortal(app:FastifyInstance,tenant:Tenant,whatsapp?:WhatsAppManager){
+ const changes=new WorkspaceChanges(),streams=new Set<import('node:http').ServerResponse>();
+ app.addHook('preClose',async()=>{for(const stream of streams)stream.end();streams.clear()});
+ app.addHook('onClose',async()=>changes.close());
+ app.get('/status-api/events',async(req,reply)=>{
+  const session=await portalSession(req);
+  const unsubscribe=await changes.subscribe(org=>{if(org==='*')reply.raw.end();else if(org===session.organization_id&&!reply.raw.destroyed)reply.raw.write('data: changed\n\n')});
+  streams.add(reply.raw);reply.hijack();reply.raw.writeHead(200,{'Content-Type':'text/event-stream','Cache-Control':'no-store','Connection':'keep-alive','Access-Control-Allow-Origin':process.env.WEB_ORIGIN||'http://localhost:3000','Access-Control-Allow-Credentials':'true','X-Accel-Buffering':'no'});
+  reply.raw.write('data: connected\n\n');
+  const heartbeat=setInterval(()=>{void portalSession(req).then(()=>reply.raw.write(': heartbeat\n\n')).catch(()=>reply.raw.end())},25000);heartbeat.unref();
+  reply.raw.on('close',()=>{streams.delete(reply.raw);clearInterval(heartbeat);unsubscribe()});
+ });
  registerAttentionRoutes(app,tenant,portalSession,csrf);
  registerChatControls(app,portalSession,csrf);
  registerAppointmentManagement(app,tenant,portalSession,csrf);

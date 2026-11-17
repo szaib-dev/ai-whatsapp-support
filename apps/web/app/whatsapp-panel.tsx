@@ -41,7 +41,7 @@ export default function WhatsAppPanel({ org, token,requestClient }: { org: strin
         if (!controller.signal.aborted) { setLoading(false); timer = setTimeout(refresh, 2000); }
       }
     }
-    const changed=(event:Event)=>{if((event as CustomEvent).detail===org){clearTimeout(timer);void refresh();}};window.addEventListener('workspace-change',changed);
+    const changed=(event:Event)=>{if((event as CustomEvent).detail===org){invalidateConnections(org,token);clearTimeout(timer);void refresh();}};window.addEventListener('workspace-change',changed);
     void refresh();
     return () => { mounted.current = false;window.removeEventListener('workspace-change',changed); controller.abort(); clearTimeout(timer); };
   }, [request]);
@@ -49,7 +49,7 @@ export default function WhatsAppPanel({ org, token,requestClient }: { org: strin
     if (busy) return;
     setBusy(true); setNotice("");
     try {
-      const result=await request(path, "POST");
+      const result=await request(path, "POST");invalidateConnections(org,token);
       if(!path&&result.id)await request(`/${result.id}/connect`,"POST");
       const data = await request();
       if (mounted.current) { setAccounts(data.accounts); setEnabled(data.enabled);setOnlyWhenAway(!!data.onlyWhenAway); setOnline(true); }
