@@ -17,18 +17,25 @@ const cases=[
  {reset:true,message:'Salam, mujhe aik website banwani hai.',action:'REPLY'},
  {message:'Please explain your website services in English.',action:'REPLY',contains:/website|design|accessibility/i},
  {reset:true,message:'Tusi Punjabi vich gal kar sakde o? Mainu apni dukaan layi website chahidi ae.',action:'REPLY'},
- {reset:true,message:'The payment page you suggested still does not load.',action:'REPLY'},
- {message:'Great, exactly what I needed, another broken page 🙄',action:'REPLY'},
+ {reset:true,message:'The payment page still does not load. I want to speak directly with Avery, please take me out of automated replies.',action:'HANDOVER'},
+ {message:'Great, exactly what I needed, another broken page 🙄',action:'IGNORE'},
  {reset:true,message:'It is urgent. Ask Avery to call me personally.',action:'HANDOVER'},
- {reset:true,message:'Are you actually AI or a real person?',action:'REPLY',contains:/AI|artificial|automated|virtual|language model/i}
+ {reset:true,message:'Are you actually AI or a real person?',action:'REPLY',contains:/AI|artificial|automated|virtual|language model/i},
+ {message:'Hey',action:'REPLY',afterHours:12},
+ {message:'🙄🙄',action:'IGNORE'},
+ {reset:true,message:'Avery ko online bulao, unse khud baat karni hai.',action:'HANDOVER'},
+ {reset:true,message:'Main Avery naal sidhi gal karni ae, tusi jawab na deo.',action:'HANDOVER'}
 ];
 let failures=0;
 for(const [i,test] of cases.entries()){
- if(test.reset)context.history=[];
+ if(test.reset){context.history=[];context.conversation.mode='active';}
+ if(test.afterHours)context.history=context.history.map(m=>({...m,created_at:new Date(Date.now()-test.afterHours*3600000).toISOString()}));
+ context.currentMessageAt=new Date().toISOString();
  const result=await processAssistantTurn(context,test.message,new DeepSeek(),{dryRun:true});
+ if(result.handoff)context.conversation.mode='human';
  const pass=result.actions?.includes(test.action)&&(!test.contains||test.contains.test(result.reply))&&(test.action!=='IGNORE'||result.reply==='');if(!pass)failures++;
  console.log(JSON.stringify({case:i+1,pass,expected:test.action,actions:result.actions,reply:result.reply,usage:result.diagnostics?.usage,...(pass?{}:{diagnostics:result.diagnostics}),documents:result.diagnostics?.documents?.map(d=>d.name)}));
- context.history.push({organization_id:org,conversation_id:chat,sender:'customer',content:test.message,ai_context_source:'user'});
- if(result.actions?.includes('REPLY'))context.history.push({organization_id:org,conversation_id:chat,sender:'ai',content:result.reply,ai_context_source:'assistant'});
+ context.history.push({organization_id:org,conversation_id:chat,sender:'customer',content:test.message,ai_context_source:'user',created_at:context.currentMessageAt});
+ if(result.actions?.includes('REPLY'))context.history.push({organization_id:org,conversation_id:chat,sender:'ai',content:result.reply,ai_context_source:'assistant',created_at:new Date().toISOString()});
 }
 console.log(JSON.stringify({cases:cases.length,failures}));process.exitCode=failures?1:0;

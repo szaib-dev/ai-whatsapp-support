@@ -87,12 +87,12 @@ it("failure to write disconnected state does not retain a dead socket", async ()
   expect(manager.state("revive", "account", "connected")).toBe("disconnected");
 });
 
-it("marks incoming messages read and shows typing after one second",async()=>{
+it("marks incoming messages read without speculative typing",async()=>{
  vi.useFakeTimers();const socket=mock.sockets[0];
  socket.emit('messages.upsert',{type:'notify',messages:[{key:{id:'read-test',remoteJid:'customer@lid'},message:{conversation:'Hello'}}]});
  await vi.advanceTimersByTimeAsync(900);expect(socket.readMessages).not.toHaveBeenCalled();
- await vi.advanceTimersByTimeAsync(200);expect(socket.readMessages).toHaveBeenCalledWith([{id:'read-test',remoteJid:'customer@lid'}]);expect(socket.sendPresenceUpdate).toHaveBeenCalledWith('composing','customer@lid');
- await vi.advanceTimersByTimeAsync(15000);expect(socket.sendPresenceUpdate).toHaveBeenCalledWith('paused','customer@lid');
+ await vi.advanceTimersByTimeAsync(200);expect(socket.readMessages).toHaveBeenCalledWith([{id:'read-test',remoteJid:'customer@lid'}]);expect(socket.sendPresenceUpdate).not.toHaveBeenCalled();
+ await vi.advanceTimersByTimeAsync(15000);expect(socket.sendPresenceUpdate).not.toHaveBeenCalled();
 });
 it('uses incoming read sync only, never a customer reading our outbound message',async()=>{
  mock.query.mockImplementation(async(sql:string)=>({rows:sql.includes('select 1 from organizations')?[{}]:[],rowCount:1}));
@@ -202,4 +202,25 @@ it('invalid outgoing timestamps cannot become a fresh manual takeover',async()=>
  const socket=mock.sockets[0];
  for(const timestamp of [undefined,0,Number.NaN,Math.floor(Date.now()/1000)+3600])socket.emit('messages.upsert',{type:'append',messages:[{key:{id:String(timestamp),fromMe:true,remoteJid:'customer@lid'},messageTimestamp:timestamp,message:{conversation:'Invalid timestamp'}}]});
  await new Promise(resolve=>setTimeout(resolve,25));expect(owner.record).not.toHaveBeenCalled();
+});
+
+it('typing starts only for an approved outgoing response and always stops on transport failure',async()=>{
+ const socket=mock.sockets[0];socket.emit('connection.update',{connection:'open'});
+ await vi.waitFor(()=>expect(mock.bind).toHaveBeenCalled());
+ const transport=mock.bind.mock.calls[0][2];
+ socket.sendMessage.mockResolvedValueOnce({key:{id:'confirmed'}});
+ await transport.send('customer@lid','A useful response');
+ expect(socket.sendPresenceUpdate.mock.calls.slice(-2)).toEqual([['composing','customer@lid'],['paused','customer@lid']]);
+ socket.sendMessage.mockRejectedValueOnce(Error('Transport failed'));
+ await expect(transport.send('customer@lid','Another useful response')).rejects.toThrow('Transport failed');
+ expect(socket.sendPresenceUpdate.mock.calls.at(-1)).toEqual(['paused','customer@lid']);
+});
+it('contact updates and verified LID mappings survive contact events arriving before a conversation',async()=>{
+ const socket=mock.sockets[0];socket.emit('contacts.upsert',[{id:'1234567890123@lid',lid:'1234567890123@lid',phoneNumber:'923001234567@s.whatsapp.net',name:'Saved contact'}]);
+ await vi.waitFor(()=>expect(mock.query.mock.calls.some(([sql])=>sql.startsWith('insert into contacts'))).toBe(true));
+ expect(mock.query.mock.calls.some(([sql,args])=>sql.startsWith('insert into chat_phone_addresses')&&args[2]==='1234567890123@lid'&&args[3]==='923001234567')).toBe(true);
+ socket.emit('contacts.update',[{id:'923001234568@s.whatsapp.net',notify:'Updated name'}]);
+ await vi.waitFor(()=>expect(mock.query.mock.calls.some(([sql,args])=>sql.startsWith('insert into contacts')&&args[2]==='Updated name')).toBe(true));
+ socket.emit('lid-mapping.update',{lid:'1234567890124@lid',pn:'923001234568@s.whatsapp.net'});
+ await vi.waitFor(()=>expect(mock.query.mock.calls.some(([sql,args])=>sql.startsWith('insert into chat_phone_addresses')&&args[2]==='1234567890124@lid')).toBe(true));
 });

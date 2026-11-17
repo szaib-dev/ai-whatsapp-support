@@ -79,6 +79,7 @@ export class PgStore implements Store {
     ).rows.reverse();
     return {
       organization_id: org,
+      currentMessageAt:new Date(Math.max(...(e.parts||[e]).map(p=>p.timestamp||0))||Date.now()).toISOString(),
       account,
       contact,
       conversation,
@@ -177,6 +178,7 @@ export class PgStore implements Store {
           order by m.created_at desc limit 1 on conflict(conversation_id) do update set message_id=excluded.message_id,message_at=excluded.message_at,created_at=now()`,[c.organization_id,c.conversation.id,c.account.id,c.contact.identity,(e.parts||[e]).map(p=>p.id)]);
       }
       await db.query("update processing_events set state=$4 where organization_id=$1 and conversation_id=$2 and external_id=$3",[c.organization_id,c.conversation.id,e.id,attempted?'sent':'escalated']);
+      console.info('assistant_delivery',{workspace:c.organization_id,outcome:attempted?'sent':eligible?(answer?'human_control':'intentional_silence'):'suppressed',newerPending:newer,configurationChanged:!!c.agent&&agentRevision!==c.agent.settings.revision});
       await db.query("commit");
     } catch (error) {
       await db.query("rollback");

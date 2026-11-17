@@ -1129,3 +1129,29 @@ it('portal assistant controls show safe states, scoped aliases and expiry withou
  expect((await app.inject({method:'POST',url:`/status-api/chat-assistant/${c.conversation.id}/resume`,headers:f.headers,payload:{}})).statusCode).toBe(200);
  expect((await db.query<any>('select ai_opt_out,assistant_behavior,assistant_instructions from contacts where id=$1',[c.contact.id])).rows[0]).toMatchObject({ai_opt_out:false,assistant_behavior:'normal',assistant_instructions:'KEEP_PERSONALITY'});
 });
+
+it('assistant stopped tab includes numbers without chats and can unstop and resume a stopped handover directly',async()=>{
+ const f=await privacyFixture(),phone='923001234567',other='923001234568';
+ await stopPhone(f,phone);const list=(await app.inject({url:'/status-api/chat-assistant?filter=stopped',headers:f.headers})).json();
+ expect(list.chats).toHaveLength(1);expect(list.chats[0]).toMatchObject({id:null,phone,state:'stopped',privacy_stopped:true});
+ await stopPhone(f,phone,false);expect((await app.inject({url:'/status-api/chat-assistant?filter=stopped',headers:f.headers})).json().chats).toHaveLength(0);
+ const store=new PgStore(),c=(await store.load(await store.resolve(f.account.session_id),{id:id(),jid:phone+'@s.whatsapp.net',text:'Before stop'}))!;
+ await db.query("update conversations set mode='human',owner_pause_until=null where id=$1",[c.conversation.id]);await stopPhone(f,phone);await stopPhone(f,other);
+ const result=await app.inject({method:'POST',url:`/status-api/chat-assistant/${c.conversation.id}/resume`,headers:f.headers,payload:{unstop:true}});expect(result.statusCode).toBe(200);
+ expect(await isChatStopped(f.org,f.account.id,phone+'@s.whatsapp.net')).toBe(false);expect(await isChatStopped(f.org,f.account.id,other+'@s.whatsapp.net')).toBe(true);
+ expect((await db.query<any>('select mode from conversations where id=$1',[c.conversation.id])).rows[0].mode).toBe('active');
+ const unknown=(await db.query<any>('insert into contacts(organization_id,identity) values($1,$2) returning id',[f.org,id()+'@lid'])).rows[0];
+ const unresolved=(await db.query<any>('insert into conversations(organization_id,account_id,contact_id) values($1,$2,$3) returning id',[f.org,f.account.id,unknown.id])).rows[0];
+ expect((await app.inject({method:'POST',url:`/status-api/chat-assistant/${unresolved.id}/resume`,headers:f.headers,payload:{unstop:true}})).statusCode).toBe(400);
+ const allowed=(await app.inject({url:'/status-api/chat-controls?filter=allowed',headers:f.headers})).json();expect(allowed.numbers.every((r:any)=>!r.stopped)).toBe(true);
+});
+
+it('assistant controls recover saved names from verified PN contacts even before a PN conversation exists',async()=>{
+ const f=await privacyFixture(),phone='923001234567',lid='12345678901234@lid';
+ await db.query('insert into contacts(organization_id,identity,display_name) values($1,$2,$3)',[f.org,phone+'@s.whatsapp.net','Saved name']);
+ await rememberPhone(f.org,f.account.id,lid,phone);const store=new PgStore(),c=(await store.load(await store.resolve(f.account.session_id),{id:id(),jid:lid,text:'Hello'}))!;
+ await db.query("update conversations set mode='human',owner_pause_until=null where id=$1",[c.conversation.id]);
+ const result=(await app.inject({url:'/status-api/chat-assistant?filter=human',headers:f.headers})).json();expect(result.chats[0].name).toBe('Saved name');
+ await db.query('update whatsapp_accounts set removed_at=now() where id=$1',[f.account.id]);
+ expect((await app.inject({url:'/status-api/chat-assistant?filter=human',headers:f.headers})).json().chats).toHaveLength(0);
+});

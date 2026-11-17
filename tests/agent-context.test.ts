@@ -58,3 +58,11 @@ it('verbose provider explanations cannot discard valid multilingual replies or i
  expect(silent.actions).toEqual(['IGNORE']);expect(silent.reply).toBe('');
  expect(()=>providerDecision({actions:['REPLY'],reply:'',reason})).toThrow();
 });
+
+it('distinguishes a reopened conversation from old greetings and recent unanswered follow-ups using real timestamps',()=>{
+ const c=context();c.currentMessageAt='2026-11-17T17:22:35.000Z';
+ c.history=[{sender:'customer',content:'Hey',created_at:'2026-11-17T08:21:00.000Z'},{sender:'ai',content:'Hello, the owner is unavailable.',created_at:'2026-11-17T08:22:00.000Z'},{sender:'customer',content:'Hey',created_at:'2026-11-17T17:18:38.000Z'}].map(m=>({...m,organization_id:c.organization_id,conversation_id:c.conversation.id,ai_context_source:m.sender==='customer'?'user':'assistant'}));
+ const built=buildConversationContext(c,'hello'),payload=JSON.parse(built.messages[1].content);
+ expect(payload.currentMessageAt).toBe(c.currentMessageAt);expect(payload.idleMinutes).toBe(3);expect(payload.minutesSinceLastAssistantReply).toBe(540);expect(payload.recentMessages.at(-1).at).toBe('2026-11-17T17:18:38.000Z');
+ expect(payload.recentMessages).toHaveLength(3);
+});

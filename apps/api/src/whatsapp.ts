@@ -147,10 +147,10 @@ export class WhatsAppManager {
       }).catch(() => {});
     };
     this.ownerSignals(l,socket,enqueue);
-    socket.ev.on('contacts.upsert',contacts=>enqueue(async()=>{for(const contact of contacts){
-      const name=(contact.name||contact.notify||contact.verifiedName||'').trim().slice(0,120);
-      if(name&&/^.+@(s\.whatsapp\.net|lid)$/.test(contact.id))await pool.query('update contacts set display_name=coalesce(display_name,$3) where organization_id=$1 and identity=$2',[l.org,contact.id,name]);
-    }},false));
+    const contactsChanged=(contacts:any[])=>enqueue(async()=>{for(const contact of contacts)await this.rememberContact(l,contact)},false);
+    socket.ev.on('contacts.upsert',contactsChanged);
+    socket.ev.on('contacts.update',contactsChanged);
+    socket.ev.on('lid-mapping.update',mapping=>enqueue(()=>this.rememberContact(l,{id:mapping.lid,lid:mapping.lid,phoneNumber:mapping.pn}),false));
     socket.ev.on("creds.update", () => enqueue(auth.save));
     socket.ev.on("connection.update", update => enqueue(async () => {
       if (update.qr) { l.qr = await QRCode.toDataURL(update.qr); l.qrUntil = Date.now() + 55000; }
@@ -165,13 +165,16 @@ export class WhatsAppManager {
           const id = generateMessageIDV2(socket.user?.id);
           this.generatedIds.add(`${l.org}/${l.account}/${id}`);if(this.generatedIds.size>2000)this.generatedIds.delete(this.generatedIds.values().next().value!);
           await reserveOutbound(l.org,l.account,target,id);
-          const sent = await withChatPrivacy(l.org,l.account,target,()=>socket.sendMessage(target, { text }, { messageId: id }));
+          const sent = await withChatPrivacy(l.org,l.account,target,async()=>{
+            // Presence represents an approved outgoing reply, never speculative AI work.
+            try{await socket.sendPresenceUpdate('composing',target).catch(()=>{});return await socket.sendMessage(target,{text},{messageId:id});}
+            finally{await socket.sendPresenceUpdate('paused',target).catch(()=>{});}
+          });
           if (!sent?.key.id) throw new Error("Uncertain send");
           this.repliedAt.set(`${l.session}/${target}`,Date.now());
-          void socket.sendPresenceUpdate('paused',target).catch(()=>{});
           return sent.key.id;
         }});
-        l.opened=true;void this.flushHandoffs();l.qr = undefined; l.retries = 0;
+        l.opened=true;void this.refreshContactMappings(l,socket);void this.flushHandoffs();l.qr = undefined; l.retries = 0;
         await pool.query('update whatsapp_accounts set last_connection_error=null,needs_pairing=false,reconnect_after=null where organization_id=$1 and id=$2',[l.org,l.account]);
         await audit(l.org, "whatsapp_connected", l.account);
       }
@@ -242,6 +245,22 @@ export class WhatsAppManager {
       for(const chat of updates){if(chat.unreadCount===0&&chat.id&&/^.+@(s\.whatsapp\.net|lid)$/.test(chat.id))await withChatPrivacy(l.org,l.account,chat.id,()=>ownerHandled(l.org,l.account,chat.id!,messageTime(chat.timestamp||chat.conversationTimestamp)));}
     },false));
   }
+  private async rememberContact(l:Live,contact:{id?:string;lid?:string;phoneNumber?:string;name?:string;notify?:string;verifiedName?:string}){
+    const addresses=[...new Set([contact.id,contact.lid,contact.phoneNumber].filter((v):v is string=>!!v&&/^.+@(s\.whatsapp\.net|lid)$/.test(v)))];
+    const phone=addresses.map(phoneFromJid).find(Boolean);
+    if(phone)for(const address of addresses)await rememberPhone(l.org,l.account,address,phone);
+    const name=([contact.name,contact.notify,contact.verifiedName].map(v=>v?.trim()).find(Boolean)||'').slice(0,120);
+    if(name)for(const address of addresses)await pool.query('insert into contacts(organization_id,identity,display_name) values($1,$2,$3) on conflict(organization_id,identity) do update set display_name=coalesce(contacts.display_name,excluded.display_name)',[l.org,address,name]);
+    if(phone)await pool.query(`update contacts t set display_name=n.name from (
+      select max(p.display_name) as name from contacts p where p.organization_id=$1 and (p.identity=$3 or exists(select 1 from chat_phone_addresses a where a.organization_id=$1 and a.account_id=$2 and a.jid=p.identity and a.phone=$4))
+    ) n where t.organization_id=$1 and t.display_name is null and n.name is not null and (t.identity=$3 or exists(select 1 from chat_phone_addresses a where a.organization_id=$1 and a.account_id=$2 and a.jid=t.identity and a.phone=$4))`,[l.org,l.account,phone+'@s.whatsapp.net',phone]);
+  }
+  private async refreshContactMappings(l:Live,socket:WASocket){
+    try{
+      const rows=(await pool.query("select distinct p.identity from contacts p join conversations c on c.organization_id=p.organization_id and c.contact_id=p.id where c.organization_id=$1 and c.account_id=$2 and p.identity like '%@lid' limit 500",[l.org,l.account])).rows;
+      for(const row of rows){if(l.stopped||l.socket!==socket)return;const pn=await socket.signalRepository?.lidMapping?.getPNForLID(row.identity);if(pn)await this.rememberContact(l,{id:row.identity,lid:row.identity,phoneNumber:pn});}
+    }catch(error){console.warn('contact_mapping_refresh_failed',{code:(error as any)?.code||'MAPPING_UNAVAILABLE'});}
+  }
   private customerActivity(l: Live, socket: WASocket, message: any) {
     const jid=message.key.remoteJid as string;
     const receivedAt=Date.now();
@@ -253,13 +272,10 @@ export class WhatsAppManager {
         const result=await pool.query(`select o.reply_only_when_away from whatsapp_accounts a join organizations o on o.id=a.organization_id
           where a.organization_id=$1 and a.id=$2 and a.status='connected' and a.removed_at is null and (not o.reply_only_when_away or a.owner_availability='away')
           and coalesce((select (r.content->>'aiEnabled')::boolean from knowledge_publications p join knowledge_revisions r on r.organization_id=p.organization_id and r.id=p.revision_id where p.organization_id=a.organization_id),true)
-          and not exists(select 1 from contacts t join conversations c on c.organization_id=t.organization_id and c.contact_id=t.id where t.organization_id=a.organization_id and t.identity=$3 and c.account_id=a.id and (t.ai_opt_out or c.mode<>'active'))`,[l.org,l.account,jid]);
+          and not exists(select 1 from contacts t join conversations c on c.organization_id=t.organization_id and c.contact_id=t.id where t.organization_id=a.organization_id and t.identity=$3 and c.account_id=a.id and (t.ai_opt_out or t.assistant_behavior in ('ignore','human') or c.mode<>'active'))`,[l.org,l.account,jid]);
         if(!result.rowCount||l.stopped||l.socket!==socket||(this.repliedAt.get(`${l.session}/${jid}`)||0)>=receivedAt)return;
         if(!result.rows[0]?.reply_only_when_away)await socket.readMessages([message.key]).catch(()=>{});
-        await socket.presenceSubscribe(jid).catch(()=>{});
-        await socket.sendPresenceUpdate('composing',jid).catch(()=>{});
-        const end=setTimeout(()=>{this.activityTimers.delete(end);if(!l.stopped&&l.socket===socket)void socket.sendPresenceUpdate('paused',jid).catch(()=>{});},15000);
-        end.unref();this.activityTimers.add(end);
+
       }).catch(()=>{});
     },1000);timer.unref();this.activityTimers.add(timer);
   }

@@ -36,10 +36,10 @@ export function registerAgentRoutes(app:FastifyInstance,tenant:Tenant){
   const row=(await db.query('update agent_settings set context_tokens=$2,history_messages=$3,response_tokens=$4,revision=revision+1,updated_at=now() where organization_id=$1 and revision=$5 returning *',[org,v.context_tokens,v.history_messages,v.response_tokens,v.revision])).rows[0];if(!row)throw new AgentConflict('Configuration changed. Reload settings.');return row;
  }));
  app.post('/organizations/:org/agent/playground',{bodyLimit:2*1024*1024,config:{rateLimit:{max:20,timeWindow:'1 minute'}}},async req=>{
-  const body=z.object({message:z.string().trim().min(1).max(8000),history:z.array(z.object({sender:z.enum(['customer','ai']),content:z.string().max(8000)}).strict()).max(60).default([]),mode:z.enum(['active','human']).default('active')}).strict().parse(req.body);
+  const body=z.object({message:z.string().trim().min(1).max(8000),history:z.array(z.object({sender:z.enum(['customer','ai']),content:z.string().max(8000),created_at:z.string().datetime().optional()}).strict()).max(60).default([]),mode:z.enum(['active','human']).default('active')}).strict().parse(req.body);
   // Finish the read transaction before provider I/O. No live contact, account, queue or booking exists.
   const c:Context=await tenant(req,true,async(db,org)=>{const revision=await legacy(db,org),agent=await loadAgentConfiguration(db,org,revision.content),conversation=randomUUID(),contact=randomUUID(),account=randomUUID();return {
-   organization_id:org,revision,agent,account:{id:account,organization_id:org,session_id:'playground',authenticated_jid:'playground@s.whatsapp.net',status:'connected',owner_availability:'away'},
+   organization_id:org,currentMessageAt:new Date().toISOString(),revision,agent,account:{id:account,organization_id:org,session_id:'playground',authenticated_jid:'playground@s.whatsapp.net',status:'connected',owner_availability:'away'},
    conversation:{id:conversation,organization_id:org,account_id:account,contact_id:contact,mode:body.mode},contact:{id:contact,organization_id:org,identity:'playground@lid',ai_opt_out:false},memories:[],
    history:body.history.map(m=>({...m,organization_id:org,conversation_id:conversation,ai_context_source:m.sender==='customer'?'user':'assistant'}))
   };});
