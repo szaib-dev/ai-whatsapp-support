@@ -45,3 +45,10 @@ Controlled clock regressions cover the 0/14/43-minute reset sequence (29 minutes
 
 
 Explicit resume also retains an intake watermark: messages timestamped before the resume remain suppressed even if device delivery occurs later. Automatic timer expiry retains the historical deadline, so fresh post-expiry input remains eligible. Follow-up validation: 252 tests passed, one existing test skipped; TypeScript, ESLint, API build and full production build passed. The real-provider 12-case synthetic evaluation passed after the metadata fix. Deployment status and physical-device verification are reported separately.
+
+
+## Client portal chat controls
+
+`/status` → Chat controls (also accessible from the Home shortcut or mobile More menu) lists assistant status using contact names/verified numbers and control metadata only. Filters cover human handovers, 30-minute timers and stopped chats; expired timers are eligible automatically. Verified phone/LID aliases are grouped within their WhatsApp account, and the connected account number distinguishes multiple lines. Search, pagination and automatic refresh are supported.
+
+Resume clears the selected chat's handover/timer and restricted contact reply preferences, retains custom instructions, cancels old queued work and sets an intake watermark for new messages only. Privacy stops require the existing Allow confirmation first. Workspace availability, AI enablement and connection requirements still apply. Portal sessions, workspace isolation, CSRF, transaction revalidation and privacy serialization protect mutations. No message contents, previews, handover reasons, raw LIDs, agent instructions or debugging data are returned. Synthetic browser checks exercised resume/allow and 320/390 px layouts; API tests cover alias grouping, isolation, CSRF, privacy blocks and contact policy recovery.

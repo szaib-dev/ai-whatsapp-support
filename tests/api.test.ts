@@ -1096,3 +1096,35 @@ it('manual resume never revives delayed customer messages from a paused window',
  expect((await store.load(binding,late))!.conversation.mode).toBe('human');
  expect((await store.load(binding,{id:id(),jid:f.jid,text:'Fresh question',timestamp:new Date(resumed).getTime()+1000}))!.conversation.mode).toBe('active');
 });
+
+it('portal assistant controls show safe states, scoped aliases and expiry without conversation content',async()=>{
+ const f=await privacyFixture(),other=await privacyFixture(),phone='923001234567',jid=phone+'@s.whatsapp.net';
+ const store=new PgStore(),c=(await store.load(await store.resolve(f.account.session_id),{id:id(),jid,text:'PRIVATE_STATUS_MESSAGE'}))!;
+ const lid='1234567890123@lid';await rememberPhone(f.org,f.account.id,lid,phone);
+ await store.load(await store.resolve(f.account.session_id),{id:id(),jid:lid,text:'PRIVATE_ALIAS_MESSAGE'});
+ const foreign=(await store.load(await store.resolve(other.account.session_id),{id:id(),jid:'441234567891@s.whatsapp.net',text:'FOREIGN_MESSAGE'}))!;
+ const {recordOwnerMessage}=await import('../apps/api/src/owner-handover.js');
+ await recordOwnerMessage(f.org,f.account.id,lid,id(),new Date(),'PRIVATE_OWNER_MESSAGE');
+ await db.query("update conversations set handoff_reason='PRIVATE_REASON' where organization_id=$1",[f.org]);
+ expect((await app.inject({url:'/status-api/chat-assistant'})).statusCode).toBe(403);
+ const response=await app.inject({url:'/status-api/chat-assistant?filter=timed',headers:f.headers});expect(response.statusCode).toBe(200);
+ expect(response.json().chats).toHaveLength(1);expect(response.json().chats[0]).toMatchObject({phone,state:'timed',privacy_stopped:false});expect(response.json().chats[0].pause_until).toBeTruthy();
+ for(const privateValue of ['PRIVATE_STATUS_MESSAGE','PRIVATE_ALIAS_MESSAGE','PRIVATE_OWNER_MESSAGE','PRIVATE_REASON',foreign.conversation.id,other.org,f.account.id,lid])expect(response.body).not.toContain(privateValue);
+ expect((await app.inject({method:'POST',url:`/status-api/chat-assistant/${c.conversation.id}/resume`,headers:{cookie:f.cookie},payload:{}})).statusCode).toBe(403);
+ expect((await app.inject({method:'POST',url:`/status-api/chat-assistant/${foreign.conversation.id}/resume`,headers:f.headers,payload:{}})).statusCode).toBe(403);
+ const pending={id:id(),jid,text:'Queued during takeover'};await f.inbox.save(f.account.session_id,pending);
+ const resumed=await app.inject({method:'POST',url:`/status-api/chat-assistant/${c.conversation.id}/resume`,headers:f.headers,payload:{}});expect(resumed.statusCode).toBe(200);
+ expect((await db.query<any>('select mode,owner_pause_until from conversations where organization_id=$1',[f.org])).rows.every(r=>r.mode==='active'&&r.owner_pause_until===null)).toBe(true);
+ expect((await app.inject({url:'/status-api/chat-assistant',headers:f.headers})).json().chats[0].state).toBe('active');
+ await stopPhone(f,phone);
+ expect((await app.inject({url:'/status-api/chat-assistant?filter=stopped',headers:f.headers})).json().chats[0].privacy_stopped).toBe(true);
+ expect((await app.inject({method:'POST',url:`/status-api/chat-assistant/${c.conversation.id}/resume`,headers:f.headers,payload:{}})).statusCode).toBe(400);
+ expect(await isChatStopped(f.org,f.account.id,jid)).toBe(true);
+ await stopPhone(f,phone,false);
+ await db.query("update conversations set mode='human',owner_pause_until=null where organization_id=$1",[f.org]);
+ expect((await app.inject({url:'/status-api/chat-assistant?filter=human',headers:f.headers})).json().chats[0].state).toBe('human');
+ await db.query("update contacts set ai_opt_out=true,assistant_behavior='human',assistant_instructions='KEEP_PERSONALITY' where id=$1",[c.contact.id]);
+ expect((await app.inject({method:'POST',url:`/status-api/chat-assistant/${c.conversation.id}/resume`,headers:f.headers,payload:{organization_id:other.org}})).statusCode).toBe(400);
+ expect((await app.inject({method:'POST',url:`/status-api/chat-assistant/${c.conversation.id}/resume`,headers:f.headers,payload:{}})).statusCode).toBe(200);
+ expect((await db.query<any>('select ai_opt_out,assistant_behavior,assistant_instructions from contacts where id=$1',[c.contact.id])).rows[0]).toMatchObject({ai_opt_out:false,assistant_behavior:'normal',assistant_instructions:'KEEP_PERSONALITY'});
+});
