@@ -988,6 +988,9 @@ it('admin composer starts the same quiet window and idempotent send retries do n
   expect(new Date(row.owner_pause_until).getTime()-new Date(row.last_owner_message_at).getTime()).toBe(30*60000);
   await local.inject({method:'POST',url,headers,payload:{text:'Let me take care of this.',requestId}});expect(sendStaff).toHaveBeenCalledTimes(1);
   expect((await db.query<any>('select owner_pause_until from conversations where id=$1',[c.conversation.id])).rows[0].owner_pause_until).toEqual(row.owner_pause_until);
+  await local.inject({method:'POST',url:`/organizations/${f.org}/conversations/${c.conversation.id}/mode`,headers,payload:{mode:'human'}});
+  expect((await local.inject({method:'POST',url,headers,payload:{text:'Still handling this indefinitely.',requestId:id()}})).statusCode).toBe(200);
+  expect((await db.query<any>('select owner_pause_until from conversations where id=$1',[c.conversation.id])).rows[0].owner_pause_until).toBeNull();
  }finally{await local.close()}
 });
 
@@ -1025,4 +1028,71 @@ it('saving an agent document invalidates an already generated live reply',async(
  const saved=await app.inject({method:'PUT',url:`/organizations/${f.org}/agent/documents/KNOWLEDGE.md`,headers,payload:{version:doc.version,content:'# New approved prices',enabled:true,max_tokens:1200}});expect(saved.statusCode).toBe(200);
  const send=vi.fn(async()=>id());await store.finalize(c,event,'Old price generated before edit',send);expect(send).not.toHaveBeenCalled();
  const next=(await new PgStore().load(await store.resolve(f.account.session_id),{...event,id:id()}))!;expect(next.agent!.documents.find(d=>d.name==='KNOWLEDGE.md')!.content).toBe('# New approved prices');
+});
+
+it('controlled clock resets at 14 and 29 minutes and preserves permanent handover',async()=>{
+ const {recordOwnerMessage,refreshOwnerPause}=await import('../apps/api/src/owner-handover.js');
+ const f=await awayFixture(),store=new PgStore(),binding=await store.resolve(f.account.session_id);
+ const c=(await store.load(binding,{id:id(),jid:f.jid,text:'Hello'}))!;
+ const lid=id()+'@lid';const {rememberPhone}=await import('../apps/api/src/chat-privacy.js');
+ await rememberPhone(f.org,f.account.id,f.jid,'923001234567');await rememberPhone(f.org,f.account.id,lid,'923001234567');
+ const alias=(await store.load(binding,{id:id(),jid:lid,text:'Linked identity'}))!;
+ const base=Date.now(),at=(minutes:number)=>new Date(base+minutes*60000),event=id();
+ vi.useFakeTimers({toFake:['Date']});
+ try{
+  for(const minute of [0,14,43]){
+   vi.setSystemTime(at(minute));
+   await recordOwnerMessage(f.org,f.account.id,minute===14?lid:f.jid,minute===14?event:id(),at(minute),'Owner reply');
+   const row=(await db.query<any>('select owner_pause_until,last_owner_message_at from conversations where id=$1',[c.conversation.id])).rows[0];
+   expect(new Date(row.owner_pause_until)).toEqual(at(minute+30));expect(new Date(row.last_owner_message_at)).toEqual(at(minute));
+   const mapped=(await db.query<any>('select owner_pause_until from conversations where id=$1',[alias.conversation.id])).rows[0];expect(mapped.owner_pause_until).toEqual(row.owner_pause_until);
+  }
+  await recordOwnerMessage(f.org,f.account.id,f.jid,event,at(14),'Duplicate');
+  await recordOwnerMessage(f.org,f.account.id,f.jid,id(),at(20),'Delayed older reply');
+  expect(await refreshOwnerPause(f.org,f.account.id,c.conversation.id,at(72),at(72))).toBe(true);
+  vi.setSystemTime(at(74));
+  const restarted=new PgStore();
+  expect((await restarted.load(binding,{id:id(),jid:f.jid,text:'Fresh question',timestamp:at(74).getTime()}))!.conversation.mode).toBe('active');
+  expect(await refreshOwnerPause(f.org,f.account.id,c.conversation.id,at(50),at(74))).toBe(true);
+  const adapter={query:async(...args:any[])=>{const r=await (db.query as any)(...args);return {...r,rowCount:r.affectedRows??r.rows.length}}};
+  const {setConversationMode}=await import('../apps/api/src/attention-routes.js');
+  await setConversationMode(adapter,f.org,c.conversation.id,'human');
+  vi.setSystemTime(at(75));await recordOwnerMessage(f.org,f.account.id,f.jid,id(),at(75),'Human continues');
+  expect(await refreshOwnerPause(f.org,f.account.id,c.conversation.id,at(200),at(200))).toBe(true);
+  expect((await db.query<any>('select owner_pause_until from conversations where id=$1',[c.conversation.id])).rows[0].owner_pause_until).toBeNull();
+ }finally{vi.useRealTimers();}
+});
+
+it('offline owner history cannot cancel fresh intake after its expired pause',async()=>{
+ const {recordOwnerMessage}=await import('../apps/api/src/owner-handover.js');
+ const f=await awayFixture(),store=new PgStore(),c=(await store.load(await store.resolve(f.account.session_id),{id:id(),jid:f.jid,text:'Hello'}))!;
+ const fresh={id:id(),jid:f.jid,text:'A new question',timestamp:Date.now()};await f.inbox.save(f.account.session_id,fresh);
+ const version=(await db.query<any>('select assistant_version from conversations where id=$1',[c.conversation.id])).rows[0].assistant_version;
+ await recordOwnerMessage(f.org,f.account.id,f.jid,id(),new Date(Date.now()-2*3600000),'Old offline history');
+ expect((await db.query<any>('select state,owner_handled_at from whatsapp_inbox where external_id=$1',[fresh.id])).rows[0]).toMatchObject({state:'pending',owner_handled_at:null});
+ expect((await db.query<any>('select mode,assistant_version from conversations where id=$1',[c.conversation.id])).rows[0]).toMatchObject({mode:'active',assistant_version:version});
+});
+
+it('inbox groups report the latest alias deadline and preserve indefinite handover',async()=>{
+ const {groupConversations}=await import('../apps/api/src/contact-identity.js');
+ const row={id:id(),account_id:id(),phone:'923001234567',unread_count:0,mode:'active',owner_pause_until:null};
+ const until=new Date(Date.now()+1800000).toISOString();
+ const timed={...row,id:id(),mode:'human',owner_pause_until:until};
+ expect(groupConversations([row,timed])[0]).toMatchObject({mode:'human',owner_pause_until:until});
+ expect(groupConversations([timed,{...row,mode:'human'}])[0].owner_pause_until).toBeNull();
+});
+
+it('manual resume never revives delayed customer messages from a paused window',async()=>{
+ const {recordOwnerMessage}=await import('../apps/api/src/owner-handover.js');
+ const f=await awayFixture(),store=new PgStore(),binding=await store.resolve(f.account.session_id);
+ const c=(await store.load(binding,{id:id(),jid:f.jid,text:'Hello'}))!;
+ await recordOwnerMessage(f.org,f.account.id,f.jid,id(),new Date(Date.now()-60000),'Handling this');
+ const adapter={query:async(...args:any[])=>{const r=await (db.query as any)(...args);return {...r,rowCount:r.affectedRows??r.rows.length}}};
+ const {setConversationMode}=await import('../apps/api/src/attention-routes.js');await setConversationMode(adapter,f.org,c.conversation.id,'active');
+ const resumed=(await db.query<any>('select assistant_resumed_at from conversations where id=$1',[c.conversation.id])).rows[0].assistant_resumed_at;
+ const late={id:id(),jid:f.jid,text:'Delayed question',timestamp:new Date(resumed).getTime()-1000};
+ await f.inbox.save(f.account.session_id,late);
+ expect((await db.query<any>('select state from whatsapp_inbox where external_id=$1',[late.id])).rows[0].state).toBe('done');
+ expect((await store.load(binding,late))!.conversation.mode).toBe('human');
+ expect((await store.load(binding,{id:id(),jid:f.jid,text:'Fresh question',timestamp:new Date(resumed).getTime()+1000}))!.conversation.mode).toBe('active');
 });

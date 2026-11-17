@@ -205,15 +205,22 @@ export class WhatsAppManager {
           if(await isChatStopped(l.org,l.account,jid,messageTime(message.messageTimestamp).getTime()))return;
           assertPrivacyLease();
           if(message.key.fromMe){
-            const time=messageTime(message.messageTimestamp);
+            const rawTime=message.messageTimestamp;
+            const seconds=typeof rawTime==='object'&&rawTime&&'toNumber' in rawTime?rawTime.toNumber():Number(rawTime);
+            if(!Number.isFinite(seconds)||seconds<=0||seconds*1000>Date.now()+60000)return;
+            const time=new Date(seconds*1000);
             if(!this.generatedIds.has(`${l.org}/${l.account}/${message.key.id}`)&&message.messageTimestamp){
               const ours=await isGeneratedMessage(l.org,l.account,jid,message.key.id!);
               if(!ours){
                 const content=normalizeMessageContent(message.message);
                 const text=content?.conversation||content?.extendedTextMessage?.text||'[WhatsApp attachment]';
-                // Only live outgoing events may pause. Replay is recorded/deduplicated separately.
-                if(event.type==='notify')await recordOwnerMessage(l.org,l.account,jid,message.key.id!,time,text);
-                await ownerHandled(l.org,l.account,jid,time);
+                // Baileys emits offline/linked-device outgoing messages as append.
+                // Use the original timestamp plus durable deduplication, not event type.
+                // Protocol sync messages are not manual conversation messages.
+                if(content && Object.keys(content).some(key=>!['protocolMessage','senderKeyDistributionMessage','messageContextInfo'].includes(key))){
+                  await recordOwnerMessage(l.org,l.account,jid,message.key.id!,time,text);
+                  await ownerHandled(l.org,l.account,jid,time);
+                }
               }
             }
             return;

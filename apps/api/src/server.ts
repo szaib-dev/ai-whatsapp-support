@@ -234,9 +234,10 @@ export async function buildServer(whatsapp?: WhatsAppManager,options:{pushWorker
     if(!whatsapp?.ready || account?.status!=='connected' || account?.removed_at)throw new Unavailable();
     const existing=(await db.query('select status from messages where organization_id=$1 and conversation_id=$2 and external_id=$3',[org,id,requestId])).rows[0];
     if(existing)return existing;
-    await setConversationMode(db,org,id,'human');
     const ids=await equivalentConversations(db,org,id);
-    await db.query("update conversations set last_owner_message_at=now(),owner_pause_until=now()+interval '30 minutes',handoff_reason='Owner replied from dashboard' where organization_id=$1 and id=any($2::uuid[])",[org,ids]);
+    const permanent=(await db.query("select 1 from conversations where organization_id=$1 and id=any($2::uuid[]) and mode='human' and owner_pause_until is null limit 1",[org,ids])).rows.length>0;
+    await setConversationMode(db,org,id,'human');
+    await db.query("update conversations set last_owner_message_at=now(),owner_pause_until=case when $3 then null else now()+interval '30 minutes' end,handoff_reason=case when $3 then 'Manually taken over' else 'Owner replied from dashboard' end where organization_id=$1 and id=any($2::uuid[])",[org,ids,permanent]);
     await db.query("insert into messages(organization_id,conversation_id,external_id,sender,content,status) values($1,$2,$3,'staff',$4,'sending')",[org,id,requestId,text]);
     // Persist intent before the external effect. Duplicate request IDs never resend.
     await db.query('commit');await db.query('begin');

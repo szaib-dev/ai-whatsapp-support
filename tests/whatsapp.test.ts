@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { randomBytes } from "node:crypto";
+const owner = vi.hoisted(()=>({record:vi.fn(async()=>{}),generated:vi.fn(async()=>false)}));
+vi.mock("../apps/api/src/owner-handover.js",()=>({recordOwnerMessage:owner.record,isGeneratedMessage:owner.generated,reserveOutbound:async()=>{}}));
 const mock = vi.hoisted(() => ({ sockets: [] as any[], dispatch:undefined as undefined|((session:string,event:any)=>Promise<void>), query: vi.fn(), bind: vi.fn(), unbind: vi.fn(), receive: vi.fn(), inboxSave: vi.fn(), save: vi.fn(), audit: vi.fn(), rejectIdentity: false, leaseError: undefined as (() => void) | undefined, release: vi.fn() }));
 vi.mock("../apps/api/src/db.js", () => ({ privacyLocks:{connect:async()=>({query:async()=>({rows:[]}),on:()=>{},removeListener:()=>{},release:()=>{}})}, pool: { query: mock.query, connect: async () => ({ query: async () => ({ rows: [{ locked: true }] }), release: mock.release, on: (_name: string, handler: () => void) => { mock.leaseError = handler; } }) }, audit: mock.audit }));
 vi.mock("../apps/api/src/pipeline.js", () => ({ MessagePipeline: class { bind = mock.bind; unbind = mock.unbind; receive = mock.receive; } }));
@@ -180,4 +182,24 @@ it('a privacy stop also cancels scheduled read receipts and typing',async()=>{
  mock.sockets[0].emit('messages.upsert',{type:'notify',messages:[{key:{id:'before-stop',remoteJid:'923001234567@s.whatsapp.net'},message:{conversation:'Before stop'}}]});
  await vi.advanceTimersByTimeAsync(500);expect(mock.inboxSave).toHaveBeenCalled();stopped=true;await vi.advanceTimersByTimeAsync(1000);
  expect(mock.sockets[0].readMessages).not.toHaveBeenCalled();expect(mock.sockets[0].sendPresenceUpdate).not.toHaveBeenCalled();
+});
+
+it.each(['notify','append'])('owner messages delivered as %s reset takeover, but generated echoes and protocol sync do not',async(type)=>{
+ const time=Math.floor(Date.now()/1000),socket=mock.sockets[0];
+ const message=(id:string,content:any)=>({key:{id,remoteJid:'customer@lid',fromMe:true},messageTimestamp:time,message:content});
+ socket.emit('messages.upsert',{type,messages:[message('manual-'+type,{conversation:'I am here'})]});
+ await vi.waitFor(()=>expect(owner.record).toHaveBeenCalledTimes(1));
+ expect(owner.record).toHaveBeenCalledWith('revive','account','customer@lid','manual-'+type,new Date(time*1000),'I am here');
+ owner.generated.mockResolvedValueOnce(true);
+ socket.emit('messages.upsert',{type,messages:[message('ai-echo',{conversation:'Generated'})]});
+ await vi.waitFor(()=>expect(owner.generated).toHaveBeenCalledTimes(2));
+ socket.emit('messages.upsert',{type,messages:[message('sync',{protocolMessage:{type:0}})]});
+ await vi.waitFor(()=>expect(owner.generated).toHaveBeenCalledTimes(3));
+ expect(owner.record).toHaveBeenCalledTimes(1);expect(mock.inboxSave).not.toHaveBeenCalled();
+});
+
+it('invalid outgoing timestamps cannot become a fresh manual takeover',async()=>{
+ const socket=mock.sockets[0];
+ for(const timestamp of [undefined,0,Number.NaN,Math.floor(Date.now()/1000)+3600])socket.emit('messages.upsert',{type:'append',messages:[{key:{id:String(timestamp),fromMe:true,remoteJid:'customer@lid'},messageTimestamp:timestamp,message:{conversation:'Invalid timestamp'}}]});
+ await new Promise(resolve=>setTimeout(resolve,25));expect(owner.record).not.toHaveBeenCalled();
 });

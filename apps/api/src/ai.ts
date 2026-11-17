@@ -129,7 +129,9 @@ export function providerDecision(value:unknown):ResponseDecision{
  const actions=[...new Set(raw.actions)];
  if(raw.reply?.trim()&&actions.includes('HANDOVER')&&!actions.includes('IGNORE')&&!actions.includes('REPLY'))actions.push('REPLY');
  const category=['urgent','owner','handover'].includes(raw.category||'')?raw.category:'handover';
- return structuredDecision({actions,reply:actions.includes('IGNORE')?'':raw.reply||'',reason:raw.reason||'',category});
+ // Explanatory metadata is not customer output. A verbose provider reason must
+ // not discard an otherwise valid multilingual reply or turn silence into failure.
+ return structuredDecision({actions,reply:actions.includes('IGNORE')?'':raw.reply||'',reason:(raw.reason||'').trim().slice(0,240),category});
 }
 export interface Selector {
   decide?(c:Context,text:string,rejectedReply?:string):Promise<ResponseDecision>;
@@ -182,7 +184,7 @@ export class DeepSeek implements Selector {
       body:JSON.stringify({model:process.env.DEEPSEEK_MODEL||'deepseek-chat',temperature:0.3,max_tokens:context.diagnostics.responseLimit,response_format:{type:'json_object'},messages:context.messages})});
     if(!response.ok)throw Object.assign(Error('AI provider unavailable'),{code:'PROVIDER_HTTP_'+response.status});
     const body=await response.json();const usage=body.usage?{inputTokens:Number(body.usage.prompt_tokens)||0,outputTokens:Number(body.usage.completion_tokens)||0,totalTokens:Number(body.usage.total_tokens)||0}:null;let decision:ResponseDecision;
-    try{decision=providerDecision(JSON.parse(body.choices?.[0]?.message?.content));}catch{throw Object.assign(Error('Invalid structured AI result'),{code:'PROVIDER_PARSE',diagnostics:{...context.diagnostics,usage,latencyMs:Date.now()-started}});}
+    try{decision=providerDecision(JSON.parse(body.choices?.[0]?.message?.content));}catch(error){throw Object.assign(Error('Invalid structured AI result'),{code:'PROVIDER_PARSE',diagnostics:{...context.diagnostics,usage,latencyMs:Date.now()-started,parseIssues:error instanceof z.ZodError?error.issues.map(issue=>({code:issue.code,path:issue.path})): [{code:'invalid_json'}]}});}
     const inputRate=Number(process.env.AI_INPUT_USD_PER_MILLION),outputRate=Number(process.env.AI_OUTPUT_USD_PER_MILLION);
     const estimatedCostUSD=usage&&process.env.AI_INPUT_USD_PER_MILLION&&process.env.AI_OUTPUT_USD_PER_MILLION&&Number.isFinite(inputRate)&&Number.isFinite(outputRate)&&inputRate>=0&&outputRate>=0?(usage.inputTokens*inputRate+usage.outputTokens*outputRate)/1e6:null;
     const diagnostics={...context.diagnostics,usage,estimatedCostUSD,latencyMs:Date.now()-started,model:process.env.DEEPSEEK_MODEL||'deepseek-chat',outcome:decision.actions?.includes('IGNORE')?'intentional_silence':'decision'};

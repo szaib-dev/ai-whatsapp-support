@@ -11,7 +11,13 @@ export function groupConversations(rows:any[]){
  const groups=new Map<string,any>();
  for(const row of rows){const key=row.phone?row.account_id+'/'+row.phone:row.id;const previous=groups.get(key);
   if(!previous)groups.set(key,{...row,conversation_ids:[row.id],label:row.display_name||(row.phone?'+'+row.phone:'WhatsApp contact'),phone_verified:!!row.phone});
-  else{previous.conversation_ids.push(row.id);previous.unread_count+=row.unread_count;previous.display_name||=row.display_name;if(previous.display_name)previous.label=previous.display_name;if(row.mode==='human')previous.mode='human';}
+  else{
+   const permanent=(previous.mode==='human'&&!previous.owner_pause_until)||(row.mode==='human'&&!row.owner_pause_until);
+   previous.conversation_ids.push(row.id);previous.unread_count+=row.unread_count;previous.display_name||=row.display_name;if(previous.display_name)previous.label=previous.display_name;
+   if(row.mode==='human')previous.mode='human';
+   if(permanent)previous.owner_pause_until=null;
+   else if(row.owner_pause_until&&(!previous.owner_pause_until||new Date(row.owner_pause_until)>new Date(previous.owner_pause_until)))previous.owner_pause_until=row.owner_pause_until;
+  }
  }return [...groups.values()];
 }
 export async function equivalentConversations(db:any,org:string,id:string){

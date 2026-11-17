@@ -27,7 +27,7 @@ for(const [i,test] of cases.entries()){
  if(test.reset)context.history=[];
  const result=await processAssistantTurn(context,test.message,new DeepSeek(),{dryRun:true});
  const pass=result.actions?.includes(test.action)&&(!test.contains||test.contains.test(result.reply))&&(test.action!=='IGNORE'||result.reply==='');if(!pass)failures++;
- console.log(JSON.stringify({case:i+1,pass,expected:test.action,actions:result.actions,reply:result.reply,usage:result.diagnostics?.usage,documents:result.diagnostics?.documents?.map(d=>d.name)}));
+ console.log(JSON.stringify({case:i+1,pass,expected:test.action,actions:result.actions,reply:result.reply,usage:result.diagnostics?.usage,...(pass?{}:{diagnostics:result.diagnostics}),documents:result.diagnostics?.documents?.map(d=>d.name)}));
  context.history.push({organization_id:org,conversation_id:chat,sender:'customer',content:test.message,ai_context_source:'user'});
  if(result.actions?.includes('REPLY'))context.history.push({organization_id:org,conversation_id:chat,sender:'ai',content:result.reply,ai_context_source:'assistant'});
 }

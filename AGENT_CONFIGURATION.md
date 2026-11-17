@@ -31,3 +31,17 @@ The embedded PostgreSQL/API suite covers isolation, migration, immutable history
 Browser review used the actual component with temporary in-memory sample data. Autosave, Markdown preview, history, restore confirmation, context limits, mobile selection and silent playground diagnostics were exercised. Responsive checks at 320/360/390/430/768/1024/1440/1920 px found no page-level horizontal overflow. Temporary QA routes are removed before release. Real WhatsApp sends and real notification/Google operations are not triggered by this evaluation.
 
 Final local checks: 244 tests passed and one existing test skipped; TypeScript, ESLint, production build, deployment-script regression scenarios, dependency audit and Linux npm 10 clean-install dry run passed. The provider evaluation passed all 12 synthetic cases. Production deployment is monitored separately after the commit is pushed.
+
+
+## Rolling takeover reliability follow-up
+
+The installed Baileys `messages-recv.js` emits offline messages with `append` and live messages with `notify`; a notify-only owner guard missed linked-device/offline outgoing traffic. Both now reach the same persisted deduplication and monotonic timestamp handling. Protocol sync traffic, missing/invalid/future timestamps and reserved AI/dashboard transport IDs do not count as native manual replies. Customer history remains excluded from live intake.
+
+Every new genuine owner timestamp extends the contact's deadline by 30 minutes, propagating through verified account-scoped phone/LID aliases. Explicit indefinite takeover stays indefinite, including dashboard sends. Old offline history cannot cancel fresh intake after its historical deadline or invalidate an otherwise eligible fresh generation. Inbox alias groups show the latest temporary deadline and retain indefinite status when applicable. Timer diagnostics contain event types/counts/deadlines, never message bodies, names or phone numbers.
+
+A live synthetic Punjabi evaluation exposed another parser root cause: a valid reply was rejected because its provider explanation exceeded the 240-character metadata limit. Explanations are now bounded independently; action consistency and customer reply validation remain strict. Parsing failures expose only issue codes/field paths in diagnostics.
+
+Controlled clock regressions cover the 0/14/43-minute reset sequence (29 minutes after the previous reply), duplicate and older events, mapped aliases, a new worker reading persisted state, automatic expiry, delayed paused intake and permanent handover. Existing tests also cover in-progress generation cancellation, per-contact independence, outbound ID persistence and workspace isolation. Transport tests exercise both notify/append events, protocol and AI echoes, and invalid timestamps. These are synthetic socket events; physical phone/linked-device delivery still requires a real device exchange and must not be claimed as verified solely from these tests.
+
+
+Explicit resume also retains an intake watermark: messages timestamped before the resume remain suppressed even if device delivery occurs later. Automatic timer expiry retains the historical deadline, so fresh post-expiry input remains eligible. Follow-up validation: 252 tests passed, one existing test skipped; TypeScript, ESLint, API build and full production build passed. The real-provider 12-case synthetic evaluation passed after the metadata fix. Deployment status and physical-device verification are reported separately.

@@ -47,3 +47,14 @@ it('reports actual provider token usage without logging private conversation tex
  const result=await new DeepSeek().decide(c,'PRIVATE_CONVERSATION_CANARY 🙄');expect(result.diagnostics?.usage).toEqual({inputTokens:100,outputTokens:20,totalTokens:120});expect(result.diagnostics?.estimatedCostUSD).toBeCloseTo(.00014);
  expect(JSON.stringify(log.mock.calls)).not.toContain('PRIVATE_CONVERSATION_CANARY');expect(JSON.stringify(log.mock.calls)).not.toContain('test-only-key');
 });
+
+it('verbose provider explanations cannot discard valid multilingual replies or intentional silence',async()=>{
+ const {providerDecision}=await import('../apps/api/src/ai.js');
+ const reason='Customer asks in Punjabi about a website for their shop. '.repeat(8);
+ const reply='Ji haan, main Punjabi vich gal kar sakda haan.';
+ const result=providerDecision({actions:['REPLY'],reply,reason,category:'owner'});
+ expect(result.reply).toBe(reply);expect(result.reason).toHaveLength(240);
+ const silent=providerDecision({actions:['IGNORE'],reply:'',reason,category:'owner'});
+ expect(silent.actions).toEqual(['IGNORE']);expect(silent.reply).toBe('');
+ expect(()=>providerDecision({actions:['REPLY'],reply:'',reason})).toThrow();
+});
